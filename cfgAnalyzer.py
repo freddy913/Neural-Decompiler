@@ -15,8 +15,7 @@ except Exception as e:
     exit()
 
 print("Starting comprehensive CFG analysis to build the call graph...")
-# DER ENTSCHEIDENDE SCHRITT: Wir konfigurieren die CFG-Analyse so,
-# dass sie auch Querverweise (xrefs) sammelt.
+# CFG-Analyse mit XRefs
 cfg = project.analyses.CFGEmulated(
     normalize=True,
     context_sensitivity_level=2,  # Wichtig für genaue Call-Site-Analyse
@@ -55,8 +54,34 @@ else:
 
 print("\n--- End of Analysis ---")
 
+## Algorithm for long consuming target functions
+# 1. Identify target functions token size
+# 2. If token size exceeds threshold 1 (50/60% of max tokens), then decompile the context functions first
+# 2a. Start cfgAnalyzer for the context functions.
+# 2b. Use the reduced token size of decompiled context functions to help decompile the target function. (assembly has more tokens than decompiled code) 
+# 3. If token size exceeds threshold 2 (80/90% of max tokens), then reduce the context amount.. not sure how yet. 
+# 3a. Possible would be to split the target function into multiple !!decompilable!! parts.
+
+
+## After Analysis: Heuristic Algorithm to reduce context amount
+# 1. Identify all unique callers of the target function.
+# 2. For each caller, analyze its call sites to the target function.
+# 3. Group call sites by their calling context (e.g., argument values, call stack).
+# 4. Select representative call sites from each group to minimize redundancy.
+# 5. Re-run the analysis with the reduced set of contexts if necessary.
+# 6. Find the best balance of importance and size of context to fit within token limits.
+# 7. If context is too important but too large, but also as c code is smaller than assembly, then decompile context functions first and use their c code as context for the target function.
+
+contextReduction = True  # Placeholder for context reduction logic
+
+
 print("\nAssembly code of the target function:")
 try:
-    target_func.pp()
+    # create txt file with assembly code
+    with open(f"{target_func_name}_assembly.txt", "w") as f:
+        f.write(target_func.block().capstone)
+    print(f"Assembly code written to {target_func_name}_assembly.txt")
+    print(target_func.block().capstone)
+    # target_func.pp()
 except Exception:
     print("Could not pretty-print the function.")
