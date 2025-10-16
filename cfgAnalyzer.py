@@ -11,7 +11,6 @@ try:
     project = angr.Project("./sourceCode/multiply", auto_load_libs=False)
 except Exception as e:
     print(f"Failed to load project: {e}")
-    print("Please make sure the binary file exists at './sourceCode/multiply' relative to your execution directory.")
     exit()
 
 print("Starting comprehensive CFG analysis to build the call graph...")
@@ -24,24 +23,23 @@ cfg = project.analyses.CFGEmulated(
 print("Analysis complete.")
 
 target_func_name = "complex_multiply"
-target_func = project.kb.functions.function(name=target_func_name)
+func_candidates= cfg.functions.get_by_name(target_func_name)
+target_func = next(func_candidates, None)
 if target_func is None:
     print(f"Function '{target_func_name}' not found.")
     exit()
 
-print(f"Running XRefs analysis for '{target_func_name}'...")
-project.analyses.XRefs(func=target_func)
-
 print(f"\n--- Analyzing Callers for '{target_func_name}' at {hex(target_func.addr)} ---")
 
 callers = []
-callgraph = project.kb.functions.callgraph
-for caller_addr, _, edge_data in callgraph.in_edges(target_func.addr, data=True):
-    if edge_data.get("type") != "call":
-        continue
-    caller_func = project.kb.functions.get_by_addr(caller_addr)
-    if caller_func is not None:
-        callers.append(caller_func)
+callgraph = cfg.functions.callgraph
+try:
+    for pred_addr in callgraph.predecessors(target_func.addr):
+        caller_func = project.kb.functions.get_by_addr(pred_addr)
+        if caller_func is not None:
+            callers.append(caller_func)
+except Exception as e:
+    pass
 
 unique_callers = sorted(list(set(callers)), key=lambda f: f.addr)
 
@@ -74,14 +72,24 @@ print("\n--- End of Analysis ---")
 
 contextReduction = True  # Placeholder for context reduction logic
 
-
+# 3. Extract assembly code 
 print("\nAssembly code of the target function:")
 try:
-    # create txt file with assembly code
-    with open(f"{target_func_name}_assembly.txt", "w") as f:
-        f.write(target_func.block().capstone)
-    print(f"Assembly code written to {target_func_name}_assembly.txt")
-    print(target_func.block().capstone)
-    # target_func.pp()
-except Exception:
-    print("Could not pretty-print the function.")
+    print("\nPretty-printed version (visual control flow):")
+    target_func.pp()
+
+    lines = []
+    for block_addr in target_func.block_addrs:
+        block = project.factory.block(block_addr)
+        lines.append(f"--- Block at {hex(block.addr)} ---")
+        for insn in block.capstone.insns:
+            lines.append(str(insn))
+
+    file_name = f"{target_func_name}_assembly.txt"
+    with open(file_name, "w") as f:
+        f.write("\n".join(lines))
+    print(f"\nFull assembly code written to {file_name}")
+
+
+except Exception as e:
+    print(f"Could not extract assembly. Error: {e}")
