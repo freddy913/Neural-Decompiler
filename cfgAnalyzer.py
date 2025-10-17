@@ -73,6 +73,21 @@ def main():
     for callee in sorted(list(callees), key=lambda f: f.name):
         print(f"  - '{callee.name}'")
 
+    # extract and save assembly code of target function and its relevant context
+    print("\n--- Extracting Assembly Code ---")
+
+    target_assembly = get_full_function_assembly(target_func, project)
+    with open(f"{TARGET_FUNCTION_NAME}_assembly.txt", "w") as f:
+        f.write(target_assembly)
+    print(f"Assembly code of target function '{TARGET_FUNCTION_NAME}' written to '{TARGET_FUNCTION_NAME}_assembly.txt'")
+
+    context_functions = list(callers) + list(callees)
+    for func in context_functions:
+        context_assembly = get_full_function_assembly(func, project)
+        with open(f"{func.name}_assembly.txt", "w") as f:
+            f.write(context_assembly)
+        print(f"Assembly code of context function '{func.name}' written to '{func.name}_assembly.txt'")
+
     ## Algorithm for long consuming target functions
     # 1. Identify target functions token size
     # 2. If token size exceeds threshold 1 (50/60% of max tokens), then decompile the context functions first
@@ -90,27 +105,3 @@ def main():
     # 5. Re-run the analysis with the reduced set of contexts if necessary.
     # 6. Find the best balance of importance and size of context to fit within token limits.
     # 7. If context is too important but too large, but also as c code is smaller than assembly, then decompile context functions first and use their c code as context for the target function.
-
-    contextReduction = True  # Placeholder for context reduction logic
-
-    # 3. Extract assembly code 
-    print("\nAssembly code of the target function:")
-    try:
-        print("\nPretty-printed version (visual control flow):")
-        target_func.pp()
-
-        lines = []
-        for block_addr in target_func.block_addrs:
-            block = project.factory.block(block_addr)
-            lines.append(f"--- Block at {hex(block.addr)} ---")
-            for insn in block.capstone.insns:
-                lines.append(str(insn))
-
-        file_name = f"{target_func_name}_assembly.txt"
-        with open(file_name, "w") as f:
-            f.write("\n".join(lines))
-        print(f"\nFull assembly code written to {file_name}")
-
-
-    except Exception as e:
-        print(f"Could not extract assembly. Error: {e}")
