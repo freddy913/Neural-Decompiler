@@ -273,7 +273,7 @@ def main():
     caller_degrees = context_candidates['callers']
     callee_degrees = context_candidates['callees']
 
-    context_funcs = (
+    candidate_funcs = (
         [(func, degree, 'caller') for func, degree in caller_degrees.items()] +
         [(func, degree, 'callee') for func, degree in callee_degrees.items()]
     )
@@ -294,14 +294,14 @@ def main():
     with open("target_assembly.txt", "w", encoding="utf-8") as f:
         f.write(target_func_data['assembly'])
 
-    context_func_data = {
+    candidate_func_data = {
         'func_names': [],
         'all_functions': [],
         'total_token_count': 0
     }
 
     with open("context_assembly.txt", "w", encoding="utf-8") as f:
-        for func, degree, role in context_funcs:
+        for func, degree, role in candidate_funcs:
             func_data = get_function_data(func, project, MYTOKENIZER)
             name = func_data['name'] or 'unknown_function'
 
@@ -309,24 +309,24 @@ def main():
             f.write(func_data['assembly'])
             f.write("\n\n")
 
-        try:
-            is_leaf = is_leaf_function(func, cfg.functions.callgraph)
-        except Exception as e:
-            is_leaf = False
+            try:
+                is_leaf = is_leaf_function(func, cfg.functions.callgraph)
+            except Exception as e:
+                is_leaf = False
 
-        entry = {
-            'function_obj': func,
-            'name': name,
-            'assembly': func_data['assembly'],
-            'token_count': func_data['token_count'],
-            'degree': degree,
-            'role': role,
-            'is_leaf': is_leaf,
-            'score': 0, # Placeholder for scoring
-        }
-        context_func_data['all_functions'].append(entry)
-        context_func_data['func_names'].append(entry['name'])
-        context_func_data['total_token_count'] += func_data['token_count']
+            entry = {
+                'function_obj': func,
+                'name': name,
+                'assembly': func_data['assembly'],
+                'token_count': func_data['token_count'],
+                'degree': degree,
+                'role': role,
+                'is_leaf': is_leaf,
+                'score': 0, # Placeholder for scoring
+            }
+            candidate_func_data['all_functions'].append(entry)
+            candidate_func_data['func_names'].append(entry['name'])
+            candidate_func_data['total_token_count'] += func_data['token_count']
 
     # Heuristic Algorithms for Context Reduction
     # done -- 1. Identify all unique callers of the target function.
@@ -338,9 +338,9 @@ def main():
     # TODO: !!! -- 7. If context is too important but too large, but also as c code is smaller than assembly, then decompile context functions first and use their c code as context for the target function.
 
     ## TODO: refactor from here ongoing
-    used_canidates = apply_heuristic(target_func_data, context_func_data, CONTEXT_THRESHOLD_TOKENS, cfg.functions.callgraph)
+    context_funcs = apply_heuristic(target_func_data, candidate_func_data, CONTEXT_THRESHOLD_TOKENS, cfg.functions.callgraph)
     assembly_map = {}
-    for func in used_canidates + [target_func]:
+    for func in context_funcs + [target_func]:
         if func.assembly:
             assembly_map.append({func.assembly})
 
@@ -353,7 +353,7 @@ def main():
     context_token_budget = CONTEXT_THRESHOLD_TOKENS - target_token_count
 
     scored_candidates = []
-    for func in context_functions:
+    for func in context_funcs:
         if func.name not in assembly_map: continue
         score = 0
         if is_leaf_function(func, callgraph): score += 20
