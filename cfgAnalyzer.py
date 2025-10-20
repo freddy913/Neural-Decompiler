@@ -138,16 +138,24 @@ def get_context_candidates_with_degrees(target_func, cfg, degrees=2): # TODO: he
     return {'callers': callers, 'callees': callees}
 
 def get_function_assembly(func):
-    # takes a function object
-    # returns the assembly code as a string
-    assembly_lines = []
-    try:
-        for block in func.blocks:
-            assembly_lines.append(block.disassembly.insns_string)
-    except Exception as e:
+    if func is None:
         return ""
-    
-    return "\n".join(assembly_lines)
+
+    lines = []
+    for block in func.blocks:
+        try:
+            capstone_block = block.capstone  # CapstoneBlock
+        except Exception:
+            continue  # skip blocks we can’t lift
+
+        lines.append(f";;; Block @ {hex(block.addr)}")
+        insns = getattr(capstone_block, "insns", [])
+        if insns:
+            for insn in insns:
+                lines.append(str(insn))
+        else:
+            lines.append(str(capstone_block))
+    return "\n".join(lines)
 
 def get_token_count(assembly_code, tokenizer):
     # takes assembly code as string and a tokenizer
@@ -262,6 +270,13 @@ def main():
     print(f"\n--- Target function identified: '{TARGET_FUNCTION_NAME}' at {hex(target_func.addr)} ---")
 
     context_candidates = get_context_candidates_with_degrees(target_func, cfg, 2)
+    caller_degrees = context_candidates['callers']
+    callee_degrees = context_candidates['callees']
+
+    context_funcs = (
+        [(func, degree, 'caller') for func, degree in caller_degrees.items()] +
+        [(func, degree, 'callee') for func, degree in callee_degrees.items()]
+    )
 
     print("\n--- Context Analysis (Generation 1) ---")
     print(f"Found {len(context_candidates['callers'])} unique calling function(s):")
@@ -278,18 +293,6 @@ def main():
     target_func_data = get_function_data(target_func, project, MYTOKENIZER)
     with open("target_assembly.txt", "w", encoding="utf-8") as f:
         f.write(target_func_data['assembly'])
-    
-
-    context_assembly = []
-    for func in context_candidates:
-        func_data = get_function_data(func, project, MYTOKENIZER)
-        context_assembly.append(func_data['assembly'])
-
-    with open("context_assembly.txt", "w", encoding="utf-8") as f:
-        for func_data in context_assembly:
-            name = func_data.get('name', 'unknown_function')
-            f.write(f";;; Function: {name}\n")
-            f.write(func_data['assembly'] or "" + "\n\n")
 
     context_func_data = {
         'func_names': [],
@@ -297,20 +300,29 @@ def main():
         'total_token_count': 0
     }
 
-    for i, func in enumerate(context_candidates):
-        func_data = context_assembly[i]
+    with open("context_assembly.txt", "w", encoding="utf-8") as f:
+        for func, degree, role in context_funcs:
+            func_data = get_function_data(func, project, MYTOKENIZER)
+            name = func_data['name'] or 'unknown_function'
+
+            f.write(f";;; Function: {name} (degree {degree})\n")
+            f.write(func_data['assembly'])
+            f.write("\n\n")
+
         try:
             is_leaf = is_leaf_function(func, cfg.functions.callgraph)
         except Exception as e:
-            is_leaf = func.data('is_leaf', False)
+            is_leaf = False
 
         entry = {
             'function_obj': func,
-            'name': func_data.get('name'),
+            'name': name,
             'assembly': func_data['assembly'],
             'token_count': func_data['token_count'],
+            'degree': degree,
+            'role': role,
             'is_leaf': is_leaf,
-            score: 0, # Placeholder for scoring
+            'score': 0, # Placeholder for scoring
         }
         context_func_data['all_functions'].append(entry)
         context_func_data['func_names'].append(entry['name'])
