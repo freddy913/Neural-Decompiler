@@ -75,35 +75,67 @@ def get_context_candidates(target_func, cfg):
 
     return {'callers': callers, 'callees': callees}
 
-def get_context_candidates_with_degrees(target_func, cfg, degrees=2):
+def get_context_candidates_with_degrees(target_func, cfg, degrees=2): # TODO: here we use degrees=2 as default
     # takes a target function and the cfg
-    # returns a dictionary with callers and callees of chosen degree level
-    
-    if not target_func or degrees < 1: return {'callers': set(), 'callees': set()}
+    # returns a dictionary with callers and callees mapped to their minimum degree distance
 
-    all_callers = set()
-    all_callees = set()
+    if not target_func or degrees < 1:
+        return {'callers': {}, 'callees': {}}
 
-    nodes_to_search_from = {target_func.addr}
-    all_callers, all_callees = get_context_candidates(target_func, cfg).values()
-    visited_nodes = {target_func.addr}
-    
-    nodes_to_search_from = (set(all_callers) | set(all_callees)) - visited_nodes
+    callers = {}  # mapping: function_obj -> min degree observed
+    callees = {}  # mapping: function_obj -> min degree observed
 
-    for i in range(degrees-1):
-        for node in nodes_to_search_from:
-            round_callers, round_callees = get_context_candidates(node, cfg).values()
-            # delete duplicates of round_callers which are already in all_callers
-            round_callers = [func for func in round_callers if func and func.addr not in visited_nodes]
-            round_callees = [func for func in round_callees if func and func.addr not in visited_nodes]
-            all_callers |= set(round_callers)
-            all_callees |= set(round_callees)
-            visited_nodes.add(node.addr)
-        nodes_to_search_from = set(round_callers + round_callees) - visited_nodes
+    nodes_to_search = {target_func}
+    visited_addrs = set()
 
-    all_callees.discard(None)
-    all_callers.discard(None)        
-    return {'callers': all_callers, 'callees': all_callees}
+    for degree in range(1, degrees + 1):
+        next_nodes = set()
+
+        for node in nodes_to_search:
+            # avoid re-processing the same node address
+            if node is None or node.addr in visited_addrs:
+                continue
+
+            try:
+                neigh = get_context_candidates(node, cfg)
+                node_callers = neigh.get('callers', set()) or set()
+                node_callees = neigh.get('callees', set()) or set()
+            except Exception:
+                node_callers = set()
+                node_callees = set()
+
+            for f in node_callers:
+                if f is None:
+                    continue
+                # skip already-visited addresses and don't record the target function itself
+                if not hasattr(f, "addr") or f.addr in visited_addrs or f.addr == target_func.addr:
+                    continue
+                # record the smallest degree seen for this function
+                prev = callers.get(f)
+                if prev is None or degree < prev:
+                    callers[f] = degree
+                next_nodes.add(f)
+
+            for f in node_callees:
+                if f is None:
+                    continue
+                # skip already-visited addresses and don't record the target function itself
+                if not hasattr(f, "addr") or f.addr in visited_addrs or f.addr == target_func.addr:
+                    continue
+                prev = callees.get(f)
+                if prev is None or degree < prev:
+                    callees[f] = degree
+                next_nodes.add(f)
+
+            visited_addrs.add(node.addr)
+
+        # prepare for next round: only include nodes not yet visited
+        nodes_to_search = {f for f in next_nodes if f and hasattr(f, "addr") and f.addr not in visited_addrs and f.addr != target_func.addr}
+
+        if not nodes_to_search:
+            break
+
+    return {'callers': callers, 'callees': callees}
 
 def get_function_assembly(func):
     # takes a function object
