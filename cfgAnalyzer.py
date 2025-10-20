@@ -46,33 +46,64 @@ def get_all_functions(cfg):
 
     return list(functions)
 
+
 def get_context_candidates(target_func, cfg):
     # takes a target function and the cfg
-    # returns a dictiornary with callers and callees
-
-    all_functions = get_all_functions(cfg)
-    context_candidates = {'callers': set(), 'callees': set()}
+    # returns a dictionary with callers and callees of the target function
+    if not target_func:
+        return {'callers': set(), 'callees': set()}
 
     callgraph = cfg.functions.callgraph
-    for func in all_functions:
-        try:
-            for succ_addr in callgraph.successors(func.addr):
-                if succ_addr == target_func.addr:
-                    context_candidates['callers'].add(func)
-        except Exception as e:
-            pass
+    callers = set()
+    callees = set()
 
-        try:
-            for pred_addr in callgraph.predecessors(func.addr):
-                if pred_addr == target_func.addr:
-                    context_candidates['callees'].add(func)
-        except Exception as e:
-            pass
+    try:
+        for pred_addr in callgraph.successors(target_func.addr):
+            caller_func = cfg.functions.get_by_addr(pred_addr)
+            if caller_func:
+                callers.add(caller_func)
+    except Exception as e:
+        pass
+
+    try:
+        for succ_addr in callgraph.predecessors(target_func.addr):
+            callee_func = cfg.functions.get_by_addr(succ_addr)
+            if callee_func:
+                callees.add(callee_func)
+    except Exception as e:
+        pass
+
+    return {'callers': callers, 'callees': callees}
+
+def get_context_candidates_with_degrees(target_func, cfg, degrees=2):
+    # takes a target function and the cfg
+    # returns a dictionary with callers and callees of chosen degree level
     
-    context_candidates['callers'].discard(None)
-    context_candidates['callees'].discard(None)
+    if not target_func or degrees < 1: return {'callers': set(), 'callees': set()}
 
-    return context_candidates
+    all_callers = set()
+    all_callees = set()
+
+    nodes_to_search_from = {target_func.addr}
+    all_callers, all_callees = get_context_candidates(target_func, cfg).values()
+    visited_nodes = {target_func.addr}
+    
+    nodes_to_search_from = (set(all_callers) | set(all_callees)) - visited_nodes
+
+    for i in range(degrees-1):
+        for node in nodes_to_search_from:
+            round_callers, round_callees = get_context_candidates(node, cfg).values()
+            # delete duplicates of round_callers which are already in all_callers
+            round_callers = [func for func in round_callers if func and func.addr not in visited_nodes]
+            round_callees = [func for func in round_callees if func and func.addr not in visited_nodes]
+            all_callers |= set(round_callers)
+            all_callees |= set(round_callees)
+            visited_nodes.add(node.addr)
+        nodes_to_search_from = set(round_callers + round_callees) - visited_nodes
+
+    all_callees.discard(None)
+    all_callers.discard(None)        
+    return {'callers': all_callers, 'callees': all_callees}
 
 def get_function_assembly(func):
     # takes a function object
@@ -191,14 +222,14 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
 def main():
     project, cfg = load_project(TARGET_BINARY_PATH)
 
-    target_func = cfg.functions.get_by_name(TARGET_FUNCTION_NAME)
+    target_func = next(cfg.functions.get_by_name(TARGET_FUNCTION_NAME), None)
     if target_func is None:
         print(f"Function '{TARGET_FUNCTION_NAME}' not found.")
         exit()
 
     print(f"\n--- Target function identified: '{TARGET_FUNCTION_NAME}' at {hex(target_func.addr)} ---")
 
-    context_candidates = get_context_candidates(target_func, cfg)
+    context_candidates = get_context_candidates_with_degrees(target_func, cfg, 2)
 
     print("\n--- Context Analysis (Generation 1) ---")
     print(f"Found {len(context_candidates['callers'])} unique calling function(s):")
