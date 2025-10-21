@@ -46,7 +46,6 @@ def get_all_functions(cfg):
 
     return list(functions)
 
-
 def get_context_candidates(target_func, cfg):
     # takes a target function and the cfg
     # returns a dictionary with callers and callees of the target function
@@ -252,11 +251,29 @@ def prioritize_and_add_candidates(degree_group, remaining_candidates, context_fu
     # otherwise indicate that processing can continue
     return current_budget, False
 
+def process_degree_group(degree_group, context_funcs, remaining_candidates, current_budget):
+    for candidate in degree_group:
+        if current_budget <= 0:
+            break
+        if candidate in context_funcs:
+            try:
+                remaining_candidates.remove(candidate)
+            except ValueError:
+                pass
+            continue
+        token_count = candidate.get('token_count', 0)
+        if token_count <= current_budget:
+            current_budget = add_candidate_to_context(context_funcs, candidate, current_budget)
+        try:
+            remaining_candidates.remove(candidate)
+        except ValueError:
+            pass
+
 def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph):
     # takes the target function data and the data of the context candidates
     # implements the scoring system (leaf functions bonus etc.)
     # implements the greedy selection algorithm to select the best context functions within the budget
-    # returns a final sorted list of the slected context functions
+    # returns a final sorted list of the selected context functions
     current_budget = budget - target_func_data['token_count']
     if current_budget <= 0: # TODO: what if target_func_tokens exceed budget?
         return []
@@ -278,83 +295,25 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
         context_funcs = []
         remaining_candidates = context_candidates_data['all_functions'].copy()
 
-        # first round: choose all leaf functions # TODO not needed in REDUCTION_LEVEL=0?
-        # for candidate in list(remaining_candidates):
-        #     if current_budget <= 0:
-        #         return context_funcs
-            
-        #     token_count = candidate.get('token_count', 0)
-        #     if token_count <= current_budget and candidate not in context_funcs:
-        #         func_obj = candidate.get('function_obj', None)
-
-        #         if candidate.is_leaf: #TODO access wrong
-        #             context_funcs.append(candidate)
-        #             current_budget -= func['token_count']
-        #             try:
-        #                 remaining_candidates.remove(candidate)
-        #             except ValueError:
-        #                 pass
-        
-        # # second round: greedy selection based on token size
-        # remaining_candidates.sort(key=lambda x: x.get('token_count', float('inf')))
-
-        # for candidate in remaining_candidates:
-        #     if current_budget <= 0:
-        #         break
-        #     token_count = candidate.get('token_count', 0)
-        #     if token_count <= current_budget and candidate not in context_funcs:
-        #         context_funcs.append(candidate)
-        #         current_budget -= token_count
-        #         remaining_candidates.remove(candidate) # not strictly necessary here
-
-        # return context_funcs
-
-        # round x: selection based on degree level 
+        # level 0: selection based on degree level -> then their leaf status -> then token size
         # # TODO implement sorting here? candidate is already sorted based on degree 
 
 
-        # TODO: following: 1. if current budget doesnt hold all candidates with current degree, then always find priorization in those
-        # iterate degrees: at each step pick the lowest-degree group, prioritize it,
-        # add prioritized candidates one-by-one until budget exhausted or group exhausted,
-        # then re-evaluate remaining candidates (next degree)
-        remaining_candidates = remaining_candidates  # already present above
-
+        # Prioritize by iteratively adding candidates from the lowest-degree group one-by-one until the budget is exhausted, then repeat for the next-lowest degree group.
         while remaining_candidates and current_budget > 0:
             current_degree, total_tokens_current_degree = token_degree_level_check(remaining_candidates)
             if current_degree is None:
                 break
 
-            # collect candidates for this degree
             degree_group = [c for c in remaining_candidates if c.get('degree') == current_degree]
             if not degree_group:
-                # remove this degree and continue
                 remaining_candidates = [c for c in remaining_candidates if c.get('degree') != current_degree]
                 continue
 
-            # If we have enough budget to include the entire current degree group,
             if current_budget >= total_tokens_current_degree:
-                for candidate in degree_group:
-                    if current_budget <= 0:
-                        break
-                    if candidate in context_funcs:
-                        try:
-                            remaining_candidates.remove(candidate)
-                        except ValueError:
-                            pass
-                        continue
-                    token_count = candidate.get('token_count', 0)
-                    if token_count <= current_budget:
-                        current_budget = add_candidate_to_context(context_funcs, candidate, current_budget)
-                    try:
-                        remaining_candidates.remove(candidate)
-                    except ValueError:
-                        pass
-                # proceed to next degree
-                continue
+                process_degree_group(degree_group, context_funcs, remaining_candidates, current_budget)
 
-            # try to prioritize and add candidates within this degree;
-            # the function returns the updated budget and a flag that indicates whether
-            # the caller should stop because no further progress is possible.
+            # Prioritize: Attempts to add candidates from this degree_group, returning the updated budget and a flag (True=stop) if no further progress is possible.
             current_budget, should_break = prioritize_and_add_candidates(degree_group, remaining_candidates, context_funcs, current_budget)
             if should_break:
                 break
