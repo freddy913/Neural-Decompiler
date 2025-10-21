@@ -14,6 +14,7 @@ TARGET_BINARY_PATH = "./sourceCode/multiply"
 TARGET_FUNCTION_NAME = "complex_multiply"
 CONTEXT_THRESHOLD_TOKENS = 1028
 MYTOKENIZER = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B") # TODO: dummy,.. replace with actual tokenizer
+JUNK_FUNCTIONS = {"printf", "malloc", "free", "scanf", "puts", "gets", "exit"}
 
 def load_project(binary_path):
     # takes a path to a binary and loads an angr project
@@ -298,7 +299,6 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
         # level 0: selection based on degree level -> then their leaf status -> then token size
         # # TODO implement sorting here? candidate is already sorted based on degree 
 
-
         # Prioritize by iteratively adding candidates from the lowest-degree group one-by-one until the budget is exhausted, then repeat for the next-lowest degree group.
         while remaining_candidates and current_budget > 0:
             current_degree, total_tokens_current_degree = token_degree_level_check(remaining_candidates)
@@ -358,6 +358,11 @@ def main():
     for callee in sorted(list(context_candidates['callees']), key=lambda f: f.name):
         print(f"  - '{callee.name}'")
 
+    # Filter out junk functions from candidate_funcs
+    candidate_funcs = {func for func in candidate_funcs if func[0].name not in JUNK_FUNCTIONS}
+
+    print(f"\nAfter filtering junk functions, {len(candidate_funcs)} candidate functions remain for context consideration.")
+
     # extract and save assembly code of target function and its relevant context
     print("\n--- Extracting Assembly Code ---")
 
@@ -371,7 +376,7 @@ def main():
         'total_token_count': 0
     }
 
-    with open("context_assembly.txt", "w", encoding="utf-8") as f:
+    with open("context_candidate_assembly.txt", "w", encoding="utf-8") as f:
         for func, degree, role in candidate_funcs:
             func_data = get_function_data(func, project, MYTOKENIZER)
             name = func_data['name'] or 'unknown_function'
@@ -417,7 +422,11 @@ def main():
 
     ## TODO: refactor from here ongoing
     context_funcs = apply_heuristic(target_func_data, candidate_func_data, CONTEXT_THRESHOLD_TOKENS, cfg.functions.callgraph)
-    
+    with open("selected_context_functions.txt", "w", encoding="utf-8") as f:
+        for entry in context_funcs:
+            f.write(f";;; Function: {entry.get('name', 'unknown_function')} (degree {entry.get('degree', 'n/a')}, role {entry.get('role', 'context')})\n")
+            f.write(entry.get('assembly', '') + "\n\n")
+            
     context_segments = []
     for entry in context_funcs:
         code = entry.get('assembly') or ""
