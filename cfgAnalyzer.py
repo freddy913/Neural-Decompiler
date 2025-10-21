@@ -12,6 +12,7 @@ logging.getLogger('angr').setLevel('WARNING')
 # configurations
 TARGET_BINARY_PATH = "./sourceCode/multiply"
 TARGET_FUNCTION_NAME = "complex_multiply"
+TARGET_FUNC_ADDR = None  # will be set in main
 CONTEXT_THRESHOLD_TOKENS = 1028
 MYTOKENIZER = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B") # TODO: dummy,.. replace with actual tokenizer
 JUNK_FUNCTIONS = {"printf", "malloc", "free", "scanf", "puts", "gets", "exit"}
@@ -59,16 +60,16 @@ def get_context_candidates(target_func, cfg):
     callees = set()
 
     try:
-        for pred_addr in callgraph.successors(target_func.addr):
-            caller_func = cfg.functions.get_by_addr(pred_addr)
+        for succ_addr in callgraph.successors(target_func.addr):
+            caller_func = cfg.functions.get_by_addr(succ_addr)
             if caller_func:
                 callers.add(caller_func)
     except Exception as e:
         pass
 
     try:
-        for succ_addr in callgraph.predecessors(target_func.addr):
-            callee_func = cfg.functions.get_by_addr(succ_addr)
+        for pred_addr in callgraph.predecessors(target_func.addr):
+            callee_func = cfg.functions.get_by_addr(pred_addr)
             if callee_func:
                 callees.add(callee_func)
     except Exception as e:
@@ -214,8 +215,7 @@ def token_degree_level_check(remaining_candidates):
 
 def remove_junk_functions(funcs):
     # removes junk functions from the list of function entries
-    filtered = [f for f in funcs if f.get('name') not in JUNK_FUNCTIONS]
-    return filtered
+    return [func for func in funcs if func[0].name not in JUNK_FUNCTIONS]
 
 def _count_non_junk_callees(func_obj, callgraph, all_program_funcs, junk_set=JUNK_FUNCTIONS):
     """Return the number of outgoing call edges whose destination is not in junk_set."""
@@ -239,6 +239,10 @@ def _count_non_junk_callees(func_obj, callgraph, all_program_funcs, junk_set=JUN
     except Exception:
         # Wenn etwas schiefgeht (z.B. Funktion nicht im Graphen), nehmen wir an, sie ist ein Blatt.
         return 0
+
+def _candidate_func_has_udt_pointer(candidate_addr, cg):
+    return TARGET_FUNC_ADDR in cg.successors(candidate_addr)
+
 def prioritize_and_add_candidates(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_funcs_map):
     # Not enough budget for the whole degree: prioritize within this degree
     prioritized = sorted(
@@ -253,9 +257,9 @@ def prioritize_and_add_candidates(degree_group, remaining_candidates, context_fu
         num_callees = _count_non_junk_callees(candidate['function_obj'], callgraph, all_funcs_map, JUNK_FUNCTIONS)
         candidate['score'] -= num_callees * 5  # Penalize for more (non-junk) callees
 
-        # if candidate share udt_pointer then give bonus
-        if candidate.get('udt_pointer') and candidate['udt_pointer'] == TARGET_BINARY_PATH: # TODO i.s that correct?
-            candidate['score'] += 10  # Give bonus for sharing udt_pointer
+        if _candidate_func_has_udt_pointer(candidate['function_obj'].addr, callgraph):
+            candidate['score'] += 50  # Give bonus for sharing udt_pointer
+        
         if candidate in context_funcs:
             try:
                 remaining_candidates.remove(candidate)
@@ -366,11 +370,12 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
 
 def main():
     project, cfg = load_project(TARGET_BINARY_PATH)
-
     target_func = next(cfg.functions.get_by_name(TARGET_FUNCTION_NAME), None)
     if target_func is None:
         print(f"Function '{TARGET_FUNCTION_NAME}' not found.")
         exit()
+    global TARGET_FUNC_ADDR
+    TARGET_FUNC_ADDR = target_func.addr
 
     all_functions_map = {func.addr: func for func in cfg.functions.values()}
 
@@ -395,7 +400,7 @@ def main():
         print(f"  - '{callee.name}'")
 
     # Filter out junk functions from candidate_funcs
-    candidate_funcs = {func for func in candidate_funcs if func[0].name not in JUNK_FUNCTIONS}
+    candidate_funcs = remove_junk_functions(candidate_funcs)
 
     print(f"\nAfter filtering junk functions, {len(candidate_funcs)} candidate functions remain for context consideration.")
 
