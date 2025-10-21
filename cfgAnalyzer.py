@@ -13,7 +13,7 @@ logging.getLogger('angr').setLevel('WARNING')
 TARGET_BINARY_PATH = "./sourceCode/multiply"
 TARGET_FUNCTION_NAME = "complex_multiply"
 TARGET_FUNC_ADDR = None  # will be set in main
-CONTEXT_THRESHOLD_TOKENS = 1028
+CONTEXT_THRESHOLD_TOKENS = 1024
 MYTOKENIZER = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B") # TODO: dummy,.. replace with actual tokenizer
 JUNK_FUNCTIONS = {"printf", "malloc", "free", "scanf", "puts", "gets", "exit"}
 BASIC_SCORE = 100
@@ -243,31 +243,59 @@ def _count_non_junk_callees(func_obj, callgraph, all_program_funcs, junk_set=JUN
 def _candidate_func_has_udt_pointer(candidate_addr, cg):
     return TARGET_FUNC_ADDR in cg.successors(candidate_addr)
 
-def prioritize_and_add_candidates(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_funcs_map):
+def _calculate_candidate_score(candidate, callgraph, all_program_funcs):
+    # if current_budget <= 0:
+        #     break
+
+    # 1: semantical similarity (RAG-Idee) 
+    # similarity = calculate_embedding_similarity(candidate['name'], target_func.name, vector_db)
+    # score += similarity * 30  # Max +30 Punkte
+
+    # 2: direct udt-data pointer sharing
+    if _candidate_func_has_udt_pointer(candidate['function_obj'].addr, callgraph):
+        candidate['score'] += 30  # Give bonus for sharing udt_pointer
+
+    # 3: Leaf status, punishes complexity
+    num_callees = _count_non_junk_callees(candidate['function_obj'], callgraph, all_program_funcs, JUNK_FUNCTIONS)
+    candidate['score'] -= num_callees * 5  # Penalize for more (non-junk) callees
+
+    # 4: Call Graph distance, penalizes for higher degrees
+    candidate['score'] -= (candidate.get('degree', 0)-1) * 10  # TODO: needed if we even iterate only in degree classes?
+    
+    # 5: Token size, punishes larger functions
+    c_token_count = candidate.get('token_count', 0)
+    candidate['score'] -= c_token_count / 100  # Slightly penalize larger functions
+
+    return candidate['score']
+
+def prioritize_and_add_candidates(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_program_funcs):
     # Not enough budget for the whole degree: prioritize within this degree
-    prioritized = sorted(
-        degree_group,
-        key=lambda x: ((0 if x.get('is_leaf') else 1), x.get('token_count', float('inf')))
-    )
+    # TODO: Iterate over degree groups or all candidates?
+    # prioritized = sorted(
+    #     degree_group,
+    #     key=lambda x: ((0 if x.get('is_leaf') else 1), x.get('token_count', float('inf')))
+    # )
+    prioritized = remaining_candidates
 
     added_any = False
     for candidate in prioritized:
+        candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_program_funcs)
+        
+    # sort the prioritized list based on score (higher is better)
+    prioritized_sorted = sorted(
+        prioritized,
+        key=lambda x: (-x.get('score', 0), x.get('token_count', float('inf')))
+    )
+    for candidate in prioritized_sorted:
         if current_budget <= 0:
             break
-        num_callees = _count_non_junk_callees(candidate['function_obj'], callgraph, all_funcs_map, JUNK_FUNCTIONS)
-        candidate['score'] -= num_callees * 5  # Penalize for more (non-junk) callees
-
-        if _candidate_func_has_udt_pointer(candidate['function_obj'].addr, callgraph):
-            candidate['score'] += 50  # Give bonus for sharing udt_pointer
-        
         if candidate in context_funcs:
             try:
                 remaining_candidates.remove(candidate)
             except ValueError:
                 pass
             continue
-        token_count = candidate.get('token_count', 0)
-        if token_count <= current_budget:
+        if candidate['token_count'] <= current_budget:
             current_budget = add_candidate_to_context(context_funcs, candidate, current_budget)
             try:
                 remaining_candidates.remove(candidate)
@@ -342,14 +370,15 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
             current_degree, total_tokens_current_degree = token_degree_level_check(remaining_candidates)
             if current_degree is None:
                 break
-
+            
+            # TODO: Process all candidates OR prioritize first within lower degree levels?
             degree_group = [c for c in remaining_candidates if c.get('degree') == current_degree]
             if not degree_group:
                 remaining_candidates = [c for c in remaining_candidates if c.get('degree') != current_degree]
                 continue
 
-            if current_budget >= total_tokens_current_degree:
-                process_degree_group(degree_group, context_funcs, remaining_candidates, current_budget)
+            # if current_budget >= total_tokens_current_degree:
+            #     process_degree_group(degree_group, context_funcs, remaining_candidates, current_budget)
 
             # Prioritize: Attempts to add candidates from this degree_group, returning the updated budget and a flag (True=stop) if no further progress is possible.
             current_budget, should_break = prioritize_and_add_candidates(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
@@ -399,12 +428,11 @@ def main():
     for callee in sorted(list(context_candidates['callees']), key=lambda f: f.name):
         print(f"  - '{callee.name}'")
 
-    # Filter out junk functions from candidate_funcs
     candidate_funcs = remove_junk_functions(candidate_funcs)
 
     print(f"\nAfter filtering junk functions, {len(candidate_funcs)} candidate functions remain for context consideration.")
 
-    # extract and save assembly code of target function and its relevant context
+
     print("\n--- Extracting Assembly Code ---")
 
     target_func_data = get_function_data(target_func, project, MYTOKENIZER)
@@ -439,13 +467,12 @@ def main():
                 'degree': degree,
                 'role': role,
                 'is_leaf': is_leaf,
-                'score': BASIC_SCORE, # Placeholder for scoring
+                'score': BASIC_SCORE,
             }
             candidate_func_data['all_functions'].append(entry)
             candidate_func_data['func_names'].append(entry['name'])
             candidate_func_data['total_token_count'] += func_data['token_count']
-    #sorted candidate func data with degree level ascending # TODO maybe sort it also based on the token size
-    # sort candidate_func_data['all_functions'] ascending by degree (preserve the dict structure)
+    # sorted candidate func data with degree level ascending # TODO maybe sort it also based on the token size
     candidate_func_data['all_functions'].sort(key=lambda x: x.get('degree', float('inf')))
     # update func_names to match the new ordering
     candidate_func_data['func_names'] = [entry.get('name') for entry in candidate_func_data['all_functions']]
