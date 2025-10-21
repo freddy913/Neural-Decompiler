@@ -15,6 +15,7 @@ TARGET_FUNCTION_NAME = "complex_multiply"
 CONTEXT_THRESHOLD_TOKENS = 1028
 MYTOKENIZER = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B") # TODO: dummy,.. replace with actual tokenizer
 JUNK_FUNCTIONS = {"printf", "malloc", "free", "scanf", "puts", "gets", "exit"}
+BASIC_SCORE = 100
 
 def load_project(binary_path):
     # takes a path to a binary and loads an angr project
@@ -211,7 +212,34 @@ def token_degree_level_check(remaining_candidates):
 
     return min_degree, total_tokens_current_degree
 
-def prioritize_and_add_candidates(degree_group, remaining_candidates, context_funcs, current_budget):
+def remove_junk_functions(funcs):
+    # removes junk functions from the list of function entries
+    filtered = [f for f in funcs if f.get('name') not in JUNK_FUNCTIONS]
+    return filtered
+
+def _count_non_junk_callees(func_obj, callgraph, all_program_funcs, junk_set=JUNK_FUNCTIONS):
+    """Return the number of outgoing call edges whose destination is not in junk_set."""
+    if not func_obj:
+        return 0
+
+    try:
+        # Hole die Adressen aller direkt aufgerufenen Funktionen
+        successor_addrs = callgraph.successors(func_obj.addr)
+        
+        non_junk_count = 0
+        for addr in successor_addrs:
+            # Schlage den Namen der aufgerufenen Funktion nach
+            callee_func = all_program_funcs.get(addr)
+            if callee_func and callee_func.name not in junk_set:
+                # Wenn wir die Funktion finden und ihr Name nicht in der Junk-Liste ist, zählen wir sie.
+                non_junk_count += 1
+        
+        return non_junk_count
+        
+    except Exception:
+        # Wenn etwas schiefgeht (z.B. Funktion nicht im Graphen), nehmen wir an, sie ist ein Blatt.
+        return 0
+def prioritize_and_add_candidates(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_funcs_map):
     # Not enough budget for the whole degree: prioritize within this degree
     prioritized = sorted(
         degree_group,
@@ -222,6 +250,12 @@ def prioritize_and_add_candidates(degree_group, remaining_candidates, context_fu
     for candidate in prioritized:
         if current_budget <= 0:
             break
+        num_callees = _count_non_junk_callees(candidate['function_obj'], callgraph, all_funcs_map, JUNK_FUNCTIONS)
+        candidate['score'] -= num_callees * 5  # Penalize for more (non-junk) callees
+
+        # if candidate share udt_pointer then give bonus
+        if candidate.get('udt_pointer') and candidate['udt_pointer'] == TARGET_BINARY_PATH: # TODO i.s that correct?
+            candidate['score'] += 10  # Give bonus for sharing udt_pointer
         if candidate in context_funcs:
             try:
                 remaining_candidates.remove(candidate)
@@ -270,7 +304,7 @@ def process_degree_group(degree_group, context_funcs, remaining_candidates, curr
         except ValueError:
             pass
 
-def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph):
+def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph, all_functions_map):
     # takes the target function data and the data of the context candidates
     # implements the scoring system (leaf functions bonus etc.)
     # implements the greedy selection algorithm to select the best context functions within the budget
@@ -314,7 +348,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
                 process_degree_group(degree_group, context_funcs, remaining_candidates, current_budget)
 
             # Prioritize: Attempts to add candidates from this degree_group, returning the updated budget and a flag (True=stop) if no further progress is possible.
-            current_budget, should_break = prioritize_and_add_candidates(degree_group, remaining_candidates, context_funcs, current_budget)
+            current_budget, should_break = prioritize_and_add_candidates(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
             if should_break:
                 break
 
@@ -337,6 +371,8 @@ def main():
     if target_func is None:
         print(f"Function '{TARGET_FUNCTION_NAME}' not found.")
         exit()
+
+    all_functions_map = {func.addr: func for func in cfg.functions.values()}
 
     print(f"\n--- Target function identified: '{TARGET_FUNCTION_NAME}' at {hex(target_func.addr)} ---")
 
@@ -398,7 +434,7 @@ def main():
                 'degree': degree,
                 'role': role,
                 'is_leaf': is_leaf,
-                'score': 0, # Placeholder for scoring
+                'score': BASIC_SCORE, # Placeholder for scoring
             }
             candidate_func_data['all_functions'].append(entry)
             candidate_func_data['func_names'].append(entry['name'])
@@ -421,12 +457,12 @@ def main():
     # TODO: !!! -- 7. If context is too important but too large, but also as c code is smaller than assembly, then decompile context functions first and use their c code as context for the target function.
 
     ## TODO: refactor from here ongoing
-    context_funcs = apply_heuristic(target_func_data, candidate_func_data, CONTEXT_THRESHOLD_TOKENS, cfg.functions.callgraph)
+    context_funcs = apply_heuristic(target_func_data, candidate_func_data, CONTEXT_THRESHOLD_TOKENS, cfg.functions.callgraph, all_functions_map)
     with open("selected_context_functions.txt", "w", encoding="utf-8") as f:
         for entry in context_funcs:
             f.write(f";;; Function: {entry.get('name', 'unknown_function')} (degree {entry.get('degree', 'n/a')}, role {entry.get('role', 'context')})\n")
             f.write(entry.get('assembly', '') + "\n\n")
-            
+
     context_segments = []
     for entry in context_funcs:
         code = entry.get('assembly') or ""
