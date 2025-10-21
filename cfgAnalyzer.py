@@ -353,12 +353,40 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
 
     if current_budget <= 0.25 * budget:
         REDUCTION_LEVEL = 2
-    elif current_budget <= 0.55 * budget:
+    elif current_budget <= 0.6 * budget:
         REDUCTION_LEVEL = 1
     else:
         REDUCTION_LEVEL = 0
 
-    if REDUCTION_LEVEL == 0:
+    if REDUCTION_LEVEL == 2:
+        # 3. If token size exceeds threshold 2 (80/90% of max tokens), then reduce the context amount.. not sure how yet. 
+        # 3a. Possible would be to split the target function into multiple !!decompilable!! parts.
+        pass
+    elif REDUCTION_LEVEL == 1:
+        # 2. If token size exceeds threshold 1 (40% of max tokens), then decompile some context functions first
+        print("INFO: Target function is large. Applying 'Hybrid Context' strategy.")
+
+        # TODO: implement the hybrid-context-strategy here:
+
+        # 1. score all candidate functions based on existing scoring system
+
+        # 2. estimate c token size for first five important candidates (check if decompilation is possible without reduction first)
+
+        # 3. try to add candidates with assembly, if not enough budget, try with estimated c token size (only first 5 important candidates)
+
+        # 4. decompile it with a baseline model and with no reduction applied 
+        #    `decompiled_c = decompile_function(candidate_assembly)`
+
+        # 5. Calculate the token count of the decompiled C code.
+        #    `c_token_count = len(tokenizer(decompiled_c).input_ids)`
+
+        # 4. try to add the c_code_candidate now with the c_token_count
+        
+        print("--> (TODO: Hybrid Context logic not yet implemented, using standard selection)")
+        # Fallback
+        pass
+
+    elif REDUCTION_LEVEL == 0:
         context_funcs = []
         remaining_candidates = context_candidates_data['all_functions'].copy()
 
@@ -386,16 +414,6 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
                 break
 
         return context_funcs
-                
-    elif REDUCTION_LEVEL == 1:
-        # 2. If token size exceeds threshold 1 (50/60% of max tokens), then decompile the context functions first
-        # 2a. Start cfgAnalyzer for the context functions.
-        # 2b. Use the reduced token size of decompiled context functions to help decompile the target function. (assembly has more tokens than decompiled code) 
-        pass
-    elif REDUCTION_LEVEL == 2:
-        # 3. If token size exceeds threshold 2 (80/90% of max tokens), then reduce the context amount.. not sure how yet. 
-        # 3a. Possible would be to split the target function into multiple !!decompilable!! parts.
-        pass
 
 def main():
     project, cfg = load_project(TARGET_BINARY_PATH)
