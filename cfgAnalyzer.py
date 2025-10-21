@@ -13,7 +13,7 @@ logging.getLogger('angr').setLevel('WARNING')
 TARGET_BINARY_PATH = "./sourceCode/multiply"
 TARGET_FUNCTION_NAME = "complex_multiply"
 TARGET_FUNC_ADDR = None  # will be set in main
-CONTEXT_THRESHOLD_TOKENS = 1024
+CONTEXT_THRESHOLD_TOKENS = 1024 # TODO: substract puffer for label tokens later in post processing
 MYTOKENIZER = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B") # TODO: dummy,.. replace with actual tokenizer
 JUNK_FUNCTIONS = {"printf", "malloc", "free", "scanf", "puts", "gets", "exit"}
 BASIC_SCORE = 100
@@ -190,10 +190,14 @@ def get_function_data(func, project, tokenizer):
 def is_leaf_function(func, callgraph):
     return callgraph.out_degree(func.addr) == 0
 
-def add_candidate_to_context(context_funcs, candidate, current_budget):
+def add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget):
     token_count = candidate.get('token_count', 0)
     if token_count <= current_budget:
         context_funcs.append(candidate)
+        try:
+            remaining_candidates.remove(candidate)
+        except ValueError:
+            pass
         current_budget -= token_count
     return current_budget
 
@@ -268,9 +272,9 @@ def _calculate_candidate_score(candidate, callgraph, all_program_funcs):
 
     return candidate['score']
 
-def prioritize_and_add_candidates(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_program_funcs):
+def add_remaining_candidates_to_context(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_program_funcs):
     # Not enough budget for the whole degree: prioritize within this degree
-    # TODO: Iterate over degree groups or all candidates?
+    # TODO: Iterate over degree groups or all candidates? TODO: REMOVE DEGREE OR ALSO BREAK RETURN VALUE?
     # prioritized = sorted(
     #     degree_group,
     #     key=lambda x: ((0 if x.get('is_leaf') else 1), x.get('token_count', float('inf')))
@@ -278,8 +282,6 @@ def prioritize_and_add_candidates(degree_group, remaining_candidates, context_fu
     prioritized = remaining_candidates
 
     added_any = False
-    for candidate in prioritized:
-        candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_program_funcs)
         
     # sort the prioritized list based on score (higher is better)
     prioritized_sorted = sorted(
@@ -296,11 +298,7 @@ def prioritize_and_add_candidates(degree_group, remaining_candidates, context_fu
                 pass
             continue
         if candidate['token_count'] <= current_budget:
-            current_budget = add_candidate_to_context(context_funcs, candidate, current_budget)
-            try:
-                remaining_candidates.remove(candidate)
-            except ValueError:
-                pass
+            current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
             added_any = True
         else:
             remaining_candidates.remove(candidate)
@@ -336,6 +334,39 @@ def process_degree_group(degree_group, context_funcs, remaining_candidates, curr
         except ValueError:
             pass
 
+def estimate_c_token_complexity(func, cfg):
+    """
+    Estimates the expected C code token count based on CFG complexity.
+    Returns a numeric score (higher = more complex/more tokens).
+    """
+    if not func:
+        return float('inf') # Expection: very complex if no function provided
+
+    function_cfg = func.graph
+    
+    if not function_cfg:
+        return 1 # Expection: easy function if there is no graph
+
+    # estimation heuristic:
+    # We estimate complexity based on number of nodes and edges in the CFG. 
+    # We weight the number of nodes and edges.
+    # Edges are often a better indicator of complexity (if/else, loops).
+
+    num_nodes = function_cfg.number_of_nodes()
+    num_edges = function_cfg.number_of_edges()
+
+    # Cyclomatic complexity: a classic metric for code complexity
+    # Formula: E - N + 2P (edges - nodes + 2 * number of exits)
+    # Simplified for our purposes:
+    complexity_score = (num_edges * 1.5) + (num_nodes * 1.0)
+
+    # Scaling factor: you would need to determine this factor empirically on your dataset,
+    # but we can start with a simple assumption.
+    # E.g.: 1 complexity point ≈ 5 C-tokens
+    estimated_tokens = complexity_score * 5
+    
+    return estimated_tokens
+
 def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph, all_functions_map):
     # takes the target function data and the data of the context candidates
     # implements the scoring system (leaf functions bonus etc.)
@@ -367,25 +398,47 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
         print("INFO: Target function is large. Applying 'Hybrid Context' strategy.")
 
         # TODO: implement the hybrid-context-strategy here:
-
         # 1. score all candidate functions based on existing scoring system
+        context_funcs = []
+        remaining_candidates = context_candidates_data['all_functions'].copy()
+        for candidate in remaining_candidates:
+            candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map)
 
         # 2. estimate c token size for first five important candidates (check if decompilation is possible without reduction first)
+        important_candidates = sorted(
+            remaining_candidates,
+            key=lambda x: -x.get('score', 0)
+        )[:5]
+
+        for candidate in important_candidates:
+            if candidate.get('token_count', 0) > 0.5 * budget:
+                important_candidates.remove(candidate)
+                continue
+            else:
+                estimated_c_token_size = estimate_c_token_complexity(candidate['function_obj'], callgraph)
+                candidate['estimated_c_token_count'] = estimated_c_token_size
 
         # 3. try to add candidates with assembly, if not enough budget, try with estimated c token size (only first 5 important candidates)
-
+        for candidate in important_candidates:
+            token_count = candidate.get('token_count', 0)
+            estimated_c_token_count = candidate.get('estimated_c_token_count', float('inf'))
+            if token_count <= current_budget:
+                current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
+            elif estimated_c_token_count <= current_budget:
         # 4. decompile it with a baseline model and with no reduction applied 
         #    `decompiled_c = decompile_function(candidate_assembly)`
-
+                print(f"--> (TODO: Decompilation logic not yet implemented, using assembly token count for now)")
         # 5. Calculate the token count of the decompiled C code.
         #    `c_token_count = len(tokenizer(decompiled_c).input_ids)`
-
-        # 4. try to add the c_code_candidate now with the c_token_count
+                true_c_token_count = estimated_c_token_count  # placeholder for actual c token count
+                candidate['estimated_c_token_count'] = true_c_token_count  # update token count to c token
+                current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
+            else:
+                continue
         
-        print("--> (TODO: Hybrid Context logic not yet implemented, using standard selection)")
-        # Fallback
-        pass
+        current_budget, should_break = add_remaining_candidates_to_context(remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
 
+        return context_funcs
     elif REDUCTION_LEVEL == 0:
         context_funcs = []
         remaining_candidates = context_candidates_data['all_functions'].copy()
@@ -409,7 +462,9 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
             #     process_degree_group(degree_group, context_funcs, remaining_candidates, current_budget)
 
             # Prioritize: Attempts to add candidates from this degree_group, returning the updated budget and a flag (True=stop) if no further progress is possible.
-            current_budget, should_break = prioritize_and_add_candidates(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
+            for candidate in remaining_candidates:
+                candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map)
+            current_budget, should_break = add_remaining_candidates_to_context(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
             if should_break:
                 break
 
