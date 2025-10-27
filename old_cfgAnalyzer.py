@@ -2,7 +2,7 @@ import angr
 import logging
 from transformers import AutoTokenizer
 import copy
-# test
+
 # Set logging level to be less verbose
 logging.getLogger('cle').setLevel('ERROR')
 logging.getLogger('pyvex').setLevel('ERROR')
@@ -10,10 +10,10 @@ logging.getLogger('pyvex').setLevel('ERROR')
 logging.getLogger('angr').setLevel('WARNING')
 
 # configurations
-TARGET_BINARY_PATH = "./sourceCode/multiply"
-TARGET_FUNCTION_NAME = "complex_multiply"
+TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED/2dango_Custom-UDP-packet/executable0"
+TARGET_FUNCTION_NAME = "UdpPacketSend"
 TARGET_FUNC_ADDR = None  # will be set in main
-CONTEXT_THRESHOLD_TOKENS = 1024 # TODO: substract puffer for label tokens later in post processing
+CONTEXT_THRESHOLD_TOKENS = 7000 # TODO: substract puffer for label tokens later in post processing
 MYTOKENIZER = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B") # TODO: dummy,.. replace with actual tokenizer
 JUNK_FUNCTIONS = {"printf", "malloc", "free", "scanf", "puts", "gets", "exit"}
 BASIC_SCORE = 100
@@ -328,13 +328,13 @@ def process_degree_group(degree_group, context_funcs, remaining_candidates, curr
             continue
         token_count = candidate.get('token_count', 0)
         if token_count <= current_budget:
-            current_budget = add_candidate_to_context(context_funcs, candidate, current_budget)
+            current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
         try:
             remaining_candidates.remove(candidate)
         except ValueError:
             pass
 
-def estimate_c_token_complexity(func, cfg):
+def estimate_c_token_complexity(func):
     """
     Estimates the expected C code token count based on CFG complexity.
     Returns a numeric score (higher = more complex/more tokens).
@@ -363,7 +363,7 @@ def estimate_c_token_complexity(func, cfg):
     # Scaling factor: you would need to determine this factor empirically on your dataset,
     # but we can start with a simple assumption.
     # E.g.: 1 complexity point ≈ 5 C-tokens
-    estimated_tokens = complexity_score * 5
+    estimated_tokens = complexity_score * 5.0
     
     return estimated_tokens
 
@@ -377,7 +377,8 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
         return []
     
     try:
-        if current_budget > context_candidates_data['total_token_count', 0]:
+        total_context_tokens = context_candidates_data['total_token_count', 0]
+        if current_budget > total_context_tokens:
             return context_candidates_data['all_functions', []].copy()
     except Exception as e:
         pass
@@ -401,6 +402,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
         # 1. score all candidate functions based on existing scoring system
         context_funcs = []
         remaining_candidates = context_candidates_data['all_functions'].copy()
+        
         for candidate in remaining_candidates:
             candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map)
 
@@ -411,34 +413,51 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
         )[:5]
 
         for candidate in important_candidates:
-            if candidate.get('token_count', 0) > 0.5 * budget:
-                important_candidates.remove(candidate)
+            if current_budget <= 0:
+                break
+            
+            cand_tokens = candidate.get('token_count', 0)
+            if cand_tokens > 0.5 * budget:
+                # important_candidates.remove(candidate)
                 continue
-            else:
-                estimated_c_token_size = estimate_c_token_complexity(candidate['function_obj'], callgraph)
-                candidate['estimated_c_token_count'] = estimated_c_token_size
+
+            estimated_c_token_size = estimate_c_token_complexity(candidate['function_obj'])
+            candidate['estimated_c_token_count'] = estimated_c_token_size
+
+            if cand_tokens <= current_budget:
+                candidate['reduced_mode'] = 'assembly'
+                current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
+                continue
+
+            if estimated_c_token_size <= current_budget:
+                candidate['reduced_mode'] = 'decompiled_c'
+                candidate['token_count'] = estimated_c_token_size  # temporarily set token count to estimated c token count
+                current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
+                continue
+
+            continue
+
+        if current_budget > 0 and remaining_candidates:
+            for candidate in remaining_candidates:
+                candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map)
+
+            current_budget, should_break = add_remaining_candidates_to_context(remaining_candidates, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
+
+        return context_funcs
 
         # 3. try to add candidates with assembly, if not enough budget, try with estimated c token size (only first 5 important candidates)
-        for candidate in important_candidates:
-            token_count = candidate.get('token_count', 0)
-            estimated_c_token_count = candidate.get('estimated_c_token_count', float('inf'))
-            if token_count <= current_budget:
-                current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
-            elif estimated_c_token_count <= current_budget:
         # 4. decompile it with a baseline model and with no reduction applied 
         #    `decompiled_c = decompile_function(candidate_assembly)`
                 print(f"--> (TODO: Decompilation logic not yet implemented, using assembly token count for now)")
         # 5. Calculate the token count of the decompiled C code.
         #    `c_token_count = len(tokenizer(decompiled_c).input_ids)`
-                true_c_token_count = estimated_c_token_count  # placeholder for actual c token count
+                true_c_token_count = estimated_c_token_count  # TODO: placeholder for actual c token count
                 candidate['estimated_c_token_count'] = true_c_token_count  # update token count to c token
                 current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
             else:
                 continue
         
-        current_budget, should_break = add_remaining_candidates_to_context(remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
 
-        return context_funcs
     elif REDUCTION_LEVEL == 0:
         context_funcs = []
         remaining_candidates = context_candidates_data['all_functions'].copy()
@@ -465,6 +484,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
             for candidate in remaining_candidates:
                 candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map)
             current_budget, should_break = add_remaining_candidates_to_context(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
+
             if should_break:
                 break
 

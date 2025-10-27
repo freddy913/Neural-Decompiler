@@ -1,0 +1,3 @@
+angr==9.2.181
+transformers==4.57.1
+tqdm==4.67.1
