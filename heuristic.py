@@ -269,7 +269,7 @@ def add_decompiled_candidate_to_context(remaining_candidates, context_funcs, can
         current_budget -= token_count
     return current_budget
 
-def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph, all_functions_map, target_addr, project):
+def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph, all_functions_map, target_addr, project, mode):
     """
     Choses context functions based on the heuristic strategy within a token budget.
     """
@@ -278,7 +278,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
         return []
     
     try:
-        total_context_tokens = context_candidates_data['total_token_count', 0]
+        total_context_tokens = context_candidates_data.get('total_token_count', 0)
         if current_budget > total_context_tokens:
             return context_candidates_data['all_functions', []].copy()
     except Exception as e:
@@ -322,36 +322,21 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
                 continue
 
             if cand_tokens <= current_budget:
-                candidate['reduced_mode'] = 'assembly'
                 current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
                 continue
 
             estimated_c_token_size = estimate_c_token_complexity(candidate['function_obj'])
             #TODO: c_token count broken!!
-            candidate['estimated_c_token_count'] = estimated_c_token_size
 
             if estimated_c_token_size <= current_budget:
-                candidate['reduced_mode'] = 'decompiled_c'
                 # TODO access the current mode from project or pass as parameter??
-                # if project.mode == "train":
-                percentage = random.randint(0,100)
-                if percentage < 101: # TODO später umstellen auf 25/75 
-                    c_approx = real_c_code_for_training(candidate['function_obj'], project)
-                    if c_approx is None:
-                        c_approx = decompile_context_function_to_c(candidate['function_obj'], project)
-                else:
+                should_try_real_code = mode == "train" and random.random() < 0.25
+                c_approx = real_c_code_for_training(candidate['function_obj'], project) if should_try_real_code else None
+                if c_approx is None:
                     c_approx = decompile_context_function_to_c(candidate['function_obj'], project)
-
                 candidate['c_approx'] = c_approx
-                add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
-
-                # elif project.mode == "infer":
-                #     c_approx = decompile_context_function_to_c(candidate['function_obj'], project)
-                # TODO: store c_approx in candidate data, e.g. candidate['decompiled_c_approx'] = c_approx, 
-                candidate['token_count'] = estimated_c_token_size  # temporarily set token count to estimated c token count
                 current_budget = add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
                 continue
-
             continue
 
         if current_budget > 0 and remaining_candidates:

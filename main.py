@@ -16,7 +16,7 @@ from candidate_selection import (
 from heuristic import apply_heuristic
 from prompt_build import build_prompt_and_write_debug
 
-def build_sample(binary_path, target_function_name, mode="train"):
+def build_sample(mode="train"):
     """
     mode:
     'train' - build sample for training
@@ -70,9 +70,6 @@ def build_sample(binary_path, target_function_name, mode="train"):
     print("\n--- Extracting Assembly Code ---")
 
     target_func_data = get_function_data(target_func, project, MYTOKENIZER)
-    with open("target_assembly.txt", "w", encoding="utf-8") as f:
-        f.write(target_func_data['assembly'])
-
     context_funcs = apply_heuristic(
         target_func_data,
         candindate_func_data,
@@ -80,7 +77,8 @@ def build_sample(binary_path, target_function_name, mode="train"):
         cfg.functions.callgraph,
         all_functions_map,
         TARGET_FUNC_ADDR,
-        project
+        project,
+        mode
     )
 
     model_input_str = build_prompt_and_write_debug(
@@ -90,8 +88,8 @@ def build_sample(binary_path, target_function_name, mode="train"):
     )
 
     sample = {
-        "binary_path": binary_path,
-        "target_function_name": target_function_name,
+        "binary_path": TARGET_BINARY_PATH,
+        "target_function_name": TARGET_FUNCTION_NAME,
         "model_input": model_input_str,
     }
 
@@ -112,8 +110,6 @@ def build_sample(binary_path, target_function_name, mode="train"):
 def main():
 
     result = build_sample(
-        binary_path=TARGET_BINARY_PATH,
-        target_function_name=TARGET_FUNCTION_NAME,
         mode="train"
     )
 
