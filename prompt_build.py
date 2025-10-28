@@ -1,7 +1,6 @@
 def build_prompt_and_write_debug(
     target_func_data,
     context_funcs,
-    target_func_name_for_header,
     write_debug_files=True
 ):
     """
@@ -9,43 +8,91 @@ def build_prompt_and_write_debug(
     (Context Functions + <TARGET_SEP> + Target Function)
     """
 
-    if write_debug_files:
-        with open("selected_context_functions.txt", "w", encoding="utf-8") as f:
-            for entry in context_funcs:
-                f.write(
-                    f";;; Function: {entry.get('name', 'unknown_function')} "
-                    f"(degree {entry.get('degree', 'n/a')}, role {entry.get('role', 'context')})\n"
-                )
-                f.write(entry.get('assembly', '') + "\n\n")
+    # if write_debug_files:
+    #     with open("selected_context_functions.txt", "w", encoding="utf-8") as f:
+    #         for entry in context_funcs:
+    #             f.write(
+    #                 f";;; Function: {entry.get('name', 'unknown_function')} "
+    #                 f"(degree {entry.get('degree', 'n/a')}, role {entry.get('role', 'context')})\n"
+    #             )
+    #             f.write(entry.get('assembly', '') + "\n\n")
+
+    target_name = target_func_data.get('name') 
+    target_segment = target_func_data.get('assembly', '').strip()
     
-    context_segments = []
+    callers_block = []
+    callees_block = []
+
     for entry in context_funcs:
-        if entry.get('append_mode') != 'assembly':
+        role = entry.get('role', 'context')
+        name = entry.get('name') or 'unknown_function'
+
+        if entry.get('append_mode') == 'c_approx' and entry.get('c_approx'):
             code = entry.get('c_approx') or ""
         else:
             code = entry.get('assembly') or ""
 
         if not code:
             continue
-        
-        name = entry.get('name') or 'unknown_function'
-        degree = entry.get('degree', 'n/a')
-        role = entry.get('role', 'context')
-        header = f";;; Context: {name} (degree {degree}, role {role})"
-        context_segments.append(header + "\n" + code)
 
-    target_segment = target_func_data.get('assembly', '')
-    target_name = target_func_data.get('name', target_func_name_for_header)
-    target_header = f";;; Target: {target_name}"
+        block_tuple = (name, code.strip())  
+        if role == 'caller':
+            callers_block.append(block_tuple)
+        elif role == 'callee':
+            callees_block.append(block_tuple)
+        else:
+            callees_block.append(block_tuple)
 
-    final_context_input_string = "\n<SEP>\n".join(context_segments)
-    final_context_input_string += "\n<TARGET_SEP>\n" + target_header + "\n" + target_segment
+    def dedup(blocks):
+        seen = set()
+        out = []
+        for nm, cd in blocks:
+            if nm in seen:
+                continue
+            seen.add(nm)
+            out.append((nm, cd))
+        return out
 
+    callers_block = dedup(callers_block)
+    callees_block = dedup(callees_block)
+
+    parts = []
+
+    # Target first
+    parts.append(f"Target: {target_name}\n{target_segment}")
+
+    # Callers (BY)
+    if callers_block:
+        parts.append("BY")
+        for nm, cd in callers_block:
+            parts.append(f"Caller: {nm}\n{cd}")
+
+    # Callees (TO)
+    if callees_block:
+        parts.append("TO")
+        for nm, cd in callees_block:
+            parts.append(f"Callee: {nm}\n{cd}")
+
+    prompt = "\n\n".join(parts) + "\n"
+
+    # --- Debug-Files schreiben ---
     if write_debug_files:
-        with open("final_model_input.txt", "w", encoding="utf-8") as outf:
-            outf.write(final_context_input_string)
+        # 1. context overview
+        with open("selected_context_functions.txt", "w", encoding="utf-8") as f:
+            for entry in context_funcs or []:
+                name = entry.get('name', 'unknown_function')
+                degree = entry.get('degree', 'n/a')
+                role = entry.get('role', 'context')
+                mode = entry.get('append_mode', 'assembly')
+                f.write(f";;; Function: {name} (degree {degree}, role {role}, mode {mode})\n")
+            f.write("\n")
 
+        # 2. model input
+        with open("final_model_input.txt", "w", encoding="utf-8") as f:
+            f.write(prompt)
+
+        # 3. target assembly only
         with open("target_assembly.txt", "w", encoding="utf-8") as f:
-            f.write(target_func_data['assembly'])
+            f.write(target_segment)
 
-    return final_context_input_string
+    return prompt

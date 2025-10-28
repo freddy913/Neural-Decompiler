@@ -86,7 +86,6 @@ def build_sample(binary_path, target_function_name, mode="train"):
     model_input_str = build_prompt_and_write_debug(
         target_func_data,
         context_funcs,
-        target_func_name_for_header=TARGET_FUNCTION_NAME,
         write_debug_files=True
     )
 

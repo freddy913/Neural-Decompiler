@@ -383,7 +383,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
 
             # Prioritize: Attempts to add candidates from this degree_group, returning the updated budget and a flag (True=stop) if no further progress is possible.
             for candidate in remaining_candidates:
-                candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map)
+                candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map, target_addr)
             current_budget, should_break = add_remaining_candidates_to_context(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
 
             if should_break:
