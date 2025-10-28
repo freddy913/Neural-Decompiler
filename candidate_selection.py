@@ -1,4 +1,4 @@
-from config import JUNK_FUNCTIONS, BASIC_SCORE, MYTOKENIZER
+from config import JUNK_FUNCTIONS, RUNTIME_ENTRY_FUNCTIONS, BASIC_SCORE, MYTOKENIZER
 from binary_analysis import get_function_data
 
 def get_context_candidates(target_func, cfg):
@@ -97,9 +97,83 @@ def get_context_candidates_with_degrees(target_func, cfg, degrees=2): # TODO: he
 
 def remove_junk_functions(funcs):
     """
+    TODO: OLD? 
     removes junk functions from the list of function entries
     """
     return [func for func in funcs if func[0].name not in JUNK_FUNCTIONS]
+
+def _is_trampoline_or_tiny(func_obj, max_blocks=2, max_insns=8):
+    """
+    Remove wrapper / trampoline functions. Mostly 1 basic block, very few instructions.
+    """
+    try:
+        blocks = list(func_obj.blocks)
+    except Exception:
+        return False  # in case of error, assume not a trampoline
+    
+    if len(blocks) > max_blocks:
+        return False  # more than max blocks, not a trampoline
+
+    insn_count = 0
+    for b in blocks:
+        try:
+            cap = b.capstone
+        except Exception:
+            continue
+        insns = getattr(cap, "insns", [])
+        insn_count += len(insns)
+
+    return insn_count <= max_insns
+
+
+def is_relevant_user_like_function(func_obj, target_func_obj=None):
+    """
+    Runtime safe filtering logic.
+    Uses NO ground truth .c files.
+    Returns True = keep as context candidate
+    """
+
+    if func_obj is None:
+        return False
+
+    name = getattr(func_obj, "name", "")
+    if not name:
+        return False
+
+    if target_func_obj is not None and func_obj.addr == target_func_obj.addr:
+        return True
+
+    if name == "main":
+        return True
+
+    if name in RUNTIME_ENTRY_FUNCTIONS:
+        return False
+    
+    # drop everything from the PLT (libc/syscalls etc.)
+    if getattr(func_obj, "is_plt", False):
+        return False
+
+    # drop intern runtime functions with __ prefix
+    if name.startswith("__"):
+        return False
+
+    if _is_trampoline_or_tiny(func_obj):
+        return False
+
+    return True
+
+
+def filter_candidate_funcs_runtime_safe(funcs, target_func_obj):
+    """
+    Returns only the entries that are ok for context.
+    Uses only runtime-safe info.
+    """
+    cleaned = []
+    for func_obj, degree, role in funcs:
+        if is_relevant_user_like_function(func_obj, target_func_obj=target_func_obj):
+            cleaned.append((func_obj, degree, role))
+    return cleaned
+
 
 def is_leaf_function(func, callgraph):
     """

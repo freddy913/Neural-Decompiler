@@ -1,4 +1,5 @@
 import angr
+from config import MYTOKENIZER
 
 def load_project(binary_path):
     """
@@ -59,7 +60,7 @@ def get_function_assembly(func):
             lines.append(str(capstone_block))
     return "\n".join(lines)
 
-def get_token_count(assembly_code, tokenizer):
+def get_token_count(assembly_code, tokenizer=MYTOKENIZER):
     """
     tokenizes the assembly code and returns the token count
     """

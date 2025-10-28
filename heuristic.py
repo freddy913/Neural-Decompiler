@@ -1,5 +1,6 @@
 from config import JUNK_FUNCTIONS
-import copy
+from binary_analysis import get_token_count
+import copy, random, os, re
 
 def _count_non_junk_callees(func_obj, callgraph, all_program_funcs, junk_set=JUNK_FUNCTIONS):
     """
@@ -58,6 +59,7 @@ def _calculate_candidate_score(candidate, callgraph, all_program_funcs, target_a
 def add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget):
     token_count = candidate.get('token_count', 0)
     if token_count <= current_budget:
+        candidate['append_mode'] = 'assembly'
         context_funcs.append(candidate)
         try:
             remaining_candidates.remove(candidate)
@@ -159,7 +161,115 @@ def estimate_c_token_complexity(func):
     
     return estimated_tokens
 
-def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph, all_functions_map, target_addr):
+def real_c_code_for_training(func_obj, project):
+    """
+    Retrieves the real C code for training purposes.
+    """
+    func_name = getattr(func_obj, "name", None)
+    if not func_name:
+        return None
+    
+    if func_name.startswith("__"):
+        return None
+
+    binary_path = getattr(project, "filename", None)
+    if binary_path is None:
+        try:
+            binary_path = project.loader.main_object.binary
+        except Exception:
+            return None
+        
+    c_path_dir = binary_path.replace("/COMPILED/", "/C_COMPILE/", 1)
+    c_path_dir = os.path.dirname(c_path_dir) + "/"
+
+    if not os.path.isdir(c_path_dir):
+        return None
+    
+    candidate_source_text = None
+
+    for fname in os.listdir(c_path_dir):
+        if not fname.endswith(".c"):
+            continue
+        full_path = os.path.join(c_path_dir, fname)
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                src = f.read()
+        except Exception:
+            continue
+
+        if not re.search(rf'\b{re.escape(func_name)}\s*\(', src):
+            continue
+
+        sig_regex = re.compile(
+            rf'([A-Za-z0-9_\*\s]+?\b{re.escape(func_name)}\s*\([^;]*\)\s*\{{)',
+            re.MULTILINE
+        )
+
+
+        m = sig_regex.search(src)
+        if not m:
+            continue
+
+        start_idx = m.start()
+        brace_depth = 0
+        i = start_idx
+        n = len(src)
+        in_string = False
+        string_char = None
+        while i < n:
+            ch = src[i]
+
+            if in_string:
+                if ch == string_char:
+                    in_string = False
+                elif ch == '\\':
+                    i += 1
+            else:
+                if ch == '"' or ch == "'":
+                    in_string = True
+                    string_char = ch
+                elif ch == '{':
+                    brace_depth += 1
+                elif ch == '}':
+                    brace_depth -= 1
+                    if brace_depth == 0:
+                        end_idx = i + 1
+                        candidate_source_text = src[start_idx:end_idx]
+                        break
+
+            i += 1
+
+        if candidate_source_text is not None:
+            candidate_source_text = candidate_source_text.lstrip()
+            return candidate_source_text
+
+    return None
+
+# TODO: 
+def decompile_context_function_to_c(func_obj, project): 
+    """
+    Decompiles the given function object to C code using the project's decompiler.
+    """
+    pass
+
+# TODO: 
+def add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget): 
+    """
+    Adds a decompiled candidate to the context functions, updating the budget.
+    """
+    token_count = get_token_count(candidate['c_approx'])
+    candidate['c_token_count'] = token_count
+    if token_count <= current_budget:
+        candidate['append_mode'] = 'c_approx'
+        context_funcs.append(candidate)
+        try:
+            remaining_candidates.remove(candidate)
+        except ValueError:
+            pass
+        current_budget -= token_count
+    return current_budget
+
+def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph, all_functions_map, target_addr, project):
     """
     Choses context functions based on the heuristic strategy within a token budget.
     """
@@ -217,12 +327,29 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
                 continue
 
             estimated_c_token_size = estimate_c_token_complexity(candidate['function_obj'])
+            #TODO: c_token count broken!!
             candidate['estimated_c_token_count'] = estimated_c_token_size
 
             if estimated_c_token_size <= current_budget:
                 candidate['reduced_mode'] = 'decompiled_c'
+                # TODO access the current mode from project or pass as parameter??
+                # if project.mode == "train":
+                percentage = random.randint(0,100)
+                if percentage < 101: # TODO später umstellen auf 25/75 
+                    c_approx = real_c_code_for_training(candidate['function_obj'], project)
+                    if c_approx is None:
+                        c_approx = decompile_context_function_to_c(candidate['function_obj'], project)
+                else:
+                    c_approx = decompile_context_function_to_c(candidate['function_obj'], project)
+
+                candidate['c_approx'] = c_approx
+                add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
+
+                # elif project.mode == "infer":
+                #     c_approx = decompile_context_function_to_c(candidate['function_obj'], project)
+                # TODO: store c_approx in candidate data, e.g. candidate['decompiled_c_approx'] = c_approx, 
                 candidate['token_count'] = estimated_c_token_size  # temporarily set token count to estimated c token count
-                current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
+                current_budget = add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
                 continue
 
             continue
