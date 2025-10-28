@@ -1,21 +1,13 @@
 def build_prompt_and_write_debug(
     target_func_data,
     context_funcs,
-    write_debug_files=True
+    header_block,
+    write_debug_files=True,
 ):
     """
     Builds the final input string for the model and writes debug files if specified.
     (Context Functions + <TARGET_SEP> + Target Function)
     """
-
-    # if write_debug_files:
-    #     with open("selected_context_functions.txt", "w", encoding="utf-8") as f:
-    #         for entry in context_funcs:
-    #             f.write(
-    #                 f";;; Function: {entry.get('name', 'unknown_function')} "
-    #                 f"(degree {entry.get('degree', 'n/a')}, role {entry.get('role', 'context')})\n"
-    #             )
-    #             f.write(entry.get('assembly', '') + "\n\n")
 
     target_name = target_func_data.get('name') 
     target_segment = target_func_data.get('assembly', '').strip()
@@ -57,6 +49,9 @@ def build_prompt_and_write_debug(
     callees_block = dedup(callees_block)
 
     parts = []
+
+    if header_block:
+        parts.append(header_block.rstrip())
 
     # Target first
     parts.append(f"Target: {target_name}\n{target_segment}")

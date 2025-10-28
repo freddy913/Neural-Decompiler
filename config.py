@@ -22,3 +22,4 @@ RUNTIME_ENTRY_FUNCTIONS = {
     "__libc_csu_fini",
 }
 BASIC_SCORE = 100
+DEGREE = 2  # Default degree for context candidate selection

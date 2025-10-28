@@ -15,6 +15,7 @@ from candidate_selection import (
 
 from heuristic import apply_heuristic
 from prompt_build import build_prompt_and_write_debug
+from header_inference import build_header_block_from_binary
 
 def build_sample(mode="train"):
     """
@@ -81,10 +82,13 @@ def build_sample(mode="train"):
         mode
     )
 
+    header_block = build_header_block_from_binary(TARGET_BINARY_PATH)
+
     model_input_str = build_prompt_and_write_debug(
         target_func_data,
         context_funcs,
-        write_debug_files=True
+        header_block=header_block,
+        write_debug_files=True,
     )
 
     sample = {
