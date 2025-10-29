@@ -246,10 +246,11 @@ def real_c_code_lookup(func_obj, project):
     return None
 
 # TODO: 
-def decompile_context_function_to_c(func_obj, project): 
+def decompile_context_function_to_c(func_obj, project, model): 
     """
     Decompiles the given function object to C code using the project's decompiler.
     """
+    
     pass
 
 # TODO: 
@@ -332,8 +333,10 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
                 # TODO access the current mode from project or pass as parameter??
                 should_try_real_code = mode == "train" and random.random() < 0.25
                 c_approx = real_c_code_lookup(candidate['function_obj'], project) if should_try_real_code else None
-                if c_approx is None:
-                    c_approx = decompile_context_function_to_c(candidate['function_obj'], project)
+                if c_approx is None and mode == "train":
+                    c_approx = decompile_context_function_to_c(candidate['function_obj'], project, old_model=None) # TODO insert model here
+                else:
+                    c_approx = decompile_context_function_to_c(candidate['function_obj'], project, actual_model=None) # TODO insert model here
                 candidate['c_approx'] = c_approx
                 current_budget = add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
                 continue

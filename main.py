@@ -6,7 +6,12 @@ from config import (
 ) 
 
 from heuristic import real_c_code_lookup
-from dwarf_labeling import rewrite_dwarf_labels
+from dwarf_labeling import (
+    build_dwarf_lookup_for_repo,
+    collect_constant_pool_for_function,
+    finalize_label_for_training,
+    pick_best_match
+)
 
 from binary_analysis import load_project, get_function_data
 from candidate_selection import (
@@ -19,6 +24,17 @@ from candidate_selection import (
 from heuristic import apply_heuristic
 from prompt_build import build_prompt_and_write_debug
 from header_inference import build_header_block_from_binary
+
+import os
+
+def pick_best_match(candidates, executable_path):
+    exec_dir = os.path.dirname(executable_path)
+    def distance(cand):
+        o_dir = os.path.dirname(cand["o_path"])
+        rel = os.path.relpath(o_dir, exec_dir)
+        depth = rel.count(os.sep)
+        return depth
+    return sorted(candidates, key=distance)[0] if candidates else None
 
 def build_sample(mode="train"):
     """
@@ -101,13 +117,23 @@ def build_sample(mode="train"):
     }
 
     if mode == "train":
-        target_real_c = real_c_code_lookup(target_func, project)
-        if target_real_c:
-            labeled_c_code = rewrite_dwarf_labels(target_func, target_real_c, project)
-        else:
-            labeled_c_code = None 
+        real_src = real_c_code_lookup(target_func, project)
 
-        sample["label_c_code"] = labeled_c_code if labeled_c_code else "/* NO_GROUND_TRUTH_AVAILABLE */"
+        dwarf_lookup = build_dwarf_lookup_for_repo(os.path.dirname(TARGET_BINARY_PATH))
+
+        const_pool = collect_constant_pool_for_function(target_func, project)
+
+        final_label = finalize_label_for_training(
+            getattr(target_func, "name", None),
+            real_src,
+            const_pool,
+            dwarf_lookup
+        )
+
+        if final_label is None:
+            final_label = "/* NO_GROUND_TRUTH_AVAILABLE */"
+
+        sample["label_c_code"] = final_label
         sample["context_role"] = "train"
 
     elif mode == "infer":
@@ -132,9 +158,12 @@ def main():
     print("\n--- Final Transformer Input ---")
     print(f"ContextRole: {result['context_role']}")
     print(f"Target function: {result['target_function_name']}")
-    print(f"Input tokens preview:\n{result['model_input'][:500]}")
+    # print(f"Input tokens preview:\n{result['model_input'][:500]}")
+    # if "label_c_code" in result:
+    #     print(f"\nLabel preview:\n{result['label_c_code'][:200]}")
+    print(f"Input tokens preview:\n{result['model_input']}")
     if "label_c_code" in result:
-        print(f"\nLabel preview:\n{result['label_c_code'][:200]}")
+        print(f"\nLabel preview:\n{result['label_c_code']}")
 
 if __name__ == "__main__":
     main()
