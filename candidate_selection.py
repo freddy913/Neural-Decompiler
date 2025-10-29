@@ -1,4 +1,4 @@
-from config import JUNK_FUNCTIONS, RUNTIME_ENTRY_FUNCTIONS, BASIC_SCORE, MYTOKENIZER
+from config import JUNK_FUNCTIONS, RUNTIME_ENTRY_FUNCTIONS, BASIC_SCORE, MYTOKENIZER, DEGREE
 from binary_analysis import get_function_data
 
 def get_context_candidates(target_func, cfg):
@@ -30,7 +30,7 @@ def get_context_candidates(target_func, cfg):
 
     return {'callers': callers, 'callees': callees}
 
-def get_context_candidates_with_degrees(target_func, cfg, degrees=2): # TODO: here we use degrees=2 as default
+def get_context_candidates_with_degrees(target_func, cfg, degrees=DEGREE): # TODO: here we use degrees=2 as default
     """
     retrieves neighbours in the call graph up to a certain degree
     1 = direct callers/callees

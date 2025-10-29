@@ -5,6 +5,9 @@ from config import (
     MYTOKENIZER,
 ) 
 
+from heuristic import real_c_code_lookup
+from dwarf_labeling import rewrite_dwarf_labels
+
 from binary_analysis import load_project, get_function_data
 from candidate_selection import (
     get_context_candidates_with_degrees,
@@ -98,7 +101,13 @@ def build_sample(mode="train"):
     }
 
     if mode == "train":
-        sample["label_c_code"] = "TODO: ground truth c for train"
+        target_real_c = real_c_code_lookup(target_func, project)
+        if target_real_c:
+            labeled_c_code = rewrite_dwarf_labels(target_func, target_real_c, project)
+        else:
+            labeled_c_code = None 
+
+        sample["label_c_code"] = labeled_c_code if labeled_c_code else "/* NO_GROUND_TRUTH_AVAILABLE */"
         sample["context_role"] = "train"
 
     elif mode == "infer":

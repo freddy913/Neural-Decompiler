@@ -161,7 +161,7 @@ def estimate_c_token_complexity(func):
     
     return estimated_tokens
 
-def real_c_code_for_training(func_obj, project):
+def real_c_code_lookup(func_obj, project):
     """
     Retrieves the real C code for training purposes.
     """
@@ -331,7 +331,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
             if estimated_c_token_size <= current_budget:
                 # TODO access the current mode from project or pass as parameter??
                 should_try_real_code = mode == "train" and random.random() < 0.25
-                c_approx = real_c_code_for_training(candidate['function_obj'], project) if should_try_real_code else None
+                c_approx = real_c_code_lookup(candidate['function_obj'], project) if should_try_real_code else None
                 if c_approx is None:
                     c_approx = decompile_context_function_to_c(candidate['function_obj'], project)
                 candidate['c_approx'] = c_approx
