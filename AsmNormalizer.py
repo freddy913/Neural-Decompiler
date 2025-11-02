@@ -131,6 +131,14 @@ def _strip_addr_prefix(s: str) -> str:
     # "0x401234: mov ..." -> "mov ..."
     return re.sub(r'^\s*0x[0-9a-fA-F]+:\s*', '', s).strip()
 
+def join_semicolon(seq: list[str]) -> str:
+    """Joins with ';'."""
+    seq = [x for x in (s.strip() for s in seq) if x]
+    if not seq:
+        return ""
+    joined = ";".join(seq)
+    return re.sub(r'\s+', ' ', joined).strip()
+
 def _drop_block_lines(s: str) -> bool:
     # alles wie "Block @ 0x...." raus
     if "Block @" in s:
