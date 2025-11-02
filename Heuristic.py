@@ -1,6 +1,11 @@
-from config import JUNK_FUNCTIONS, RUNTIME_ENTRY_FUNCTIONS, BASIC_SCORE, MYTOKENIZER, DEGREE
-from binary_analysis import get_token_count, get_function_data
-import copy, random, os, re, subprocess, shutil
+import os
+import random
+import re
+import shutil
+import subprocess
+
+from ElfFeatures import get_function_data, get_token_count
+from Config import BASIC_SCORE, DEGREE, JUNK_FUNCTIONS, MYTOKENIZER, RUNTIME_ENTRY_FUNCTIONS
 
 '''
 SECTION: Candidate Selection Heuristic
@@ -34,7 +39,7 @@ def get_context_candidates(target_func, cfg):
 
     return {'callers': callers, 'callees': callees}
 
-def get_context_candidates_with_degrees(target_func, cfg, degrees=DEGREE): # TODO: here we use degrees=2 as default
+def get_context_candidates_with_degrees(target_func, cfg, degrees=DEGREE):  # TODO: validate default degree depth
     """
     retrieves neighbours in the call graph up to a certain degree
     1 = direct callers/callees
@@ -44,8 +49,8 @@ def get_context_candidates_with_degrees(target_func, cfg, degrees=DEGREE): # TOD
     if not target_func or degrees < 1:
         return {'callers': {}, 'callees': {}}
 
-    callers = {}  # mapping: function_obj -> min degree observed
-    callees = {}  # mapping: function_obj -> min degree observed
+    callers = {}  # Map function_obj -> smallest degree observed.
+    callees = {}  # Map function_obj -> smallest degree observed.
 
     nodes_to_search = {target_func}
     visited_addrs = set()
@@ -54,7 +59,7 @@ def get_context_candidates_with_degrees(target_func, cfg, degrees=DEGREE): # TOD
         next_nodes = set()
 
         for node in nodes_to_search:
-            # avoid re-processing the same node address
+            # Avoid re-processing the same node address.
             if node is None or node.addr in visited_addrs:
                 continue
 
@@ -69,10 +74,10 @@ def get_context_candidates_with_degrees(target_func, cfg, degrees=DEGREE): # TOD
             for f in node_callers:
                 if f is None:
                     continue
-                # skip already-visited addresses and don't record the target function itself
+                # Skip already-visited addresses and skip the target function itself.
                 if not hasattr(f, "addr") or f.addr in visited_addrs or f.addr == target_func.addr:
                     continue
-                # record the smallest degree seen for this function
+                # Record the smallest degree seen for this function.
                 prev = callers.get(f)
                 if prev is None or degree < prev:
                     callers[f] = degree
@@ -81,7 +86,7 @@ def get_context_candidates_with_degrees(target_func, cfg, degrees=DEGREE): # TOD
             for f in node_callees:
                 if f is None:
                     continue
-                # skip already-visited addresses and don't record the target function itself
+                # Skip already-visited addresses and skip the target function itself.
                 if not hasattr(f, "addr") or f.addr in visited_addrs or f.addr == target_func.addr:
                     continue
                 prev = callees.get(f)
@@ -91,7 +96,7 @@ def get_context_candidates_with_degrees(target_func, cfg, degrees=DEGREE): # TOD
 
             visited_addrs.add(node.addr)
 
-        # prepare for next round: only include nodes not yet visited
+        # Prepare for next round: only include nodes not yet visited.
         nodes_to_search = {f for f in next_nodes if f and hasattr(f, "addr") and f.addr not in visited_addrs and f.addr != target_func.addr}
 
         if not nodes_to_search:
@@ -101,8 +106,7 @@ def get_context_candidates_with_degrees(target_func, cfg, degrees=DEGREE): # TOD
 
 def remove_junk_functions(funcs):
     """
-    TODO: OLD? 
-    removes junk functions from the list of function entries
+    Filter out functions flagged as junk.
     """
     return [func for func in funcs if func[0].name not in JUNK_FUNCTIONS]
 
@@ -113,10 +117,10 @@ def _is_trampoline_or_tiny(func_obj, max_blocks=2, max_insns=8):
     try:
         blocks = list(func_obj.blocks)
     except Exception:
-        return False  # in case of error, assume not a trampoline
+        return False  # Assume not a trampoline if inspection fails.
     
     if len(blocks) > max_blocks:
-        return False  # more than max blocks, not a trampoline
+        return False  # Too many blocks to be a simple trampoline.
 
     insn_count = 0
     for b in blocks:
@@ -153,11 +157,11 @@ def is_relevant_user_like_function(func_obj, target_func_obj=None):
     if name in RUNTIME_ENTRY_FUNCTIONS:
         return False
     
-    # drop everything from the PLT (libc/syscalls etc.)
+    # Drop PLT stubs (libc/syscalls etc.).
     if getattr(func_obj, "is_plt", False):
         return False
 
-    # drop intern runtime functions with __ prefix
+    # Drop internal runtime helpers with "__" prefix.
     if name.startswith("__"):
         return False
 
@@ -221,10 +225,10 @@ def build_candidate_func_data(candidate_funcs, project, cfg, tokenizer=MYTOKENIZ
         candidate_func_data['all_functions'].append(entry)
         candidate_func_data['func_names'].append(entry['name'])
         candidate_func_data['total_token_count'] += func_data['token_count']
-    # sorted candidate func data with degree level ascending # TODO maybe sort it also based on the token size
+    # Sorted ascending by degree for deterministic processing.  # TODO: consider secondary sort by token size.
 
     candidate_func_data['all_functions'].sort(key=lambda x: x.get('degree', float('inf')))
-    # update func_names to match the new ordering
+    # Update func_names to match the new ordering.
     candidate_func_data['func_names'] = [entry.get('name') for entry in candidate_func_data['all_functions']]
 
     return candidate_func_data
@@ -307,7 +311,7 @@ def _readelf_symbols(binary_path: str) -> list[str]:
     
     """
     if shutil.which("readelf") is None:
-        return [] # readelf not available
+        return []  # readelf not available.
 
     try:
         out = subprocess.check_output(
@@ -318,7 +322,7 @@ def _readelf_symbols(binary_path: str) -> list[str]:
     except Exception:
         return []
     
-    # parsing similar to FSC: undefined symbols appear as GLOBAL DEFAULT  UND <name>
+    # Undefined symbols appear as: GLOBAL  DEFAULT  UND <name>.
     symbols = []
     for line in out.splitlines():
         if "UND" not in line and "UND " not in line and "UNDEF" not in line:
@@ -328,9 +332,9 @@ def _readelf_symbols(binary_path: str) -> list[str]:
         if not parts:
             continue
 
-        cand = parts[-1] # often the last part is the symbol name
+        cand = parts[-1]  # Usually the last token is the symbol name.
 
-        # filter out common decorations
+        # Filter out common decorations.
         if cand in ("UND", "UNDEF"):
             continue
 
@@ -349,7 +353,7 @@ def extract_external_symbols(binary_path: str) -> set[str]:
     for sym in raw_syms:
         base = _strip_symbol_version(sym)
 
-        # skip internal or compiler-generated symbols
+        # Skip internal or compiler-generated symbols.
         if base.startswith("__"):
             continue
 
@@ -367,14 +371,14 @@ def map_symbols_to_headers(symbols: set[str]) -> list[str]:
         for s in symbols:
             if s in sym_list:
                 needed_headers.append(header)
-                break # header import once is enough
+                break  # Adding the header once is sufficient.
 
-    # de-duplication while preserving order while dict.fromkeys() preserves insertion order in Python 3.7+
+    # Deduplicate while preserving order (dict.fromkeys keeps insertion order on Python 3.7+).
     needed_headers = list(dict.fromkeys(needed_headers))
     return needed_headers
 
-def build_header_block_from_angr_subset(project, func_objs): # TODO
-    # collect external symbols via angr, maps them to headers
+def build_header_block_from_angr_subset(project, func_objs):  # TODO: implement angr-based header discovery
+    # Placeholder: collect external symbols via angr and map them to headers.
     ...
     pass
 def build_header_block_from_binary(binary_path: str) -> str:
@@ -433,26 +437,26 @@ def _candidate_func_calls_target(candidate_addr, cg, target_addr):
 
 def _calculate_candidate_score(candidate, callgraph, all_program_funcs, target_addr):
     """
-    Scores a contetfunction (higher = better)
+    Score a context candidate (higher = better).
     """
-    # 1: semantical similarity (RAG-Idee) 
+    # 1) Semantic similarity (future RAG hook).
     # similarity = calculate_embedding_similarity(candidate['name'], target_func.name, vector_db)
-    # score += similarity * 30  # Max +30 Punkte
+    # score += similarity * 30
 
-    # 2: direct udt-data pointer sharing
+    # 2) Bonus for directly calling the target.
     if _candidate_func_calls_target(candidate['function_obj'].addr, callgraph, target_addr):
-        candidate['score'] += 30  # Give bonus for sharing udt_pointer
+        candidate['score'] += 30
 
-    # 3: Leaf status, punishes complexity
+    # 3) Penalize complex functions (non-junk callees).
     num_callees = _count_non_junk_callees(candidate['function_obj'], callgraph, all_program_funcs, JUNK_FUNCTIONS)
-    candidate['score'] -= num_callees * 5  # Penalize for more (non-junk) callees
+    candidate['score'] -= num_callees * 5
 
-    # 4: Call Graph distance, penalizes for higher degrees
-    candidate['score'] -= (candidate.get('degree', 0)-1) * 10  # TODO: needed if we even iterate only in degree classes?
+    # 4) Penalize distance in the call graph.  # TODO: confirm if degree-based iteration makes this redundant.
+    candidate['score'] -= (candidate.get('degree', 0) - 1) * 10
     
-    # 5: Token size, punishes larger functions
+    # 5) Penalize very large functions.
     c_token_count = candidate.get('token_count', 0)
-    candidate['score'] -= c_token_count / 100  # Slightly penalize larger functions
+    candidate['score'] -= c_token_count / 100
 
     return candidate['score']
 
@@ -490,16 +494,12 @@ def add_remaining_candidates_to_context(degree_group, remaining_candidates, cont
     Returns (new_budget: int, stop_processing: bool)
     stop_processing indicates that no further candidates can fit into the budget.
     """
-    # Not enough budget for the whole degree: prioritize within this degree
-    # TODO: Iterate over degree groups or all candidates? TODO: REMOVE DEGREE OR ALSO BREAK RETURN VALUE?
-    # prioritized = sorted(
-    #     degree_group,
-    #     key=lambda x: ((0 if x.get('is_leaf') else 1), x.get('token_count', float('inf')))
-    # )
+    # Not enough budget for the whole degree: prioritize within this degree.
+    # TODO: Revisit whether we should scan per degree or across all candidates.
     prioritized = remaining_candidates
     added_any = False
         
-    # sort the prioritized list based on score (higher is better)
+    # Sort the prioritized list based on score (higher is better).
     prioritized_sorted = sorted(
         prioritized,
         key=lambda x: (-x.get('score', 0), x.get('token_count', float('inf')))
@@ -523,7 +523,7 @@ def add_remaining_candidates_to_context(degree_group, remaining_candidates, cont
     if not added_any:
         any_fittable = any(c.get('token_count', 0) <= current_budget for c in remaining_candidates)
         if not any_fittable:
-            # signal the caller that no further progress is possible
+            # Signal the caller that no further progress is possible.
             return current_budget, True
 
     return current_budget, False
@@ -534,29 +534,23 @@ def estimate_c_token_complexity(func):
     Returns a numeric score (higher = more complex/more tokens).
     """
     if not func:
-        return float('inf') # Expection: very complex if no function provided
+        return float('inf')  # Treat missing function as maximally complex.
 
     function_cfg = func.graph
     
     if not function_cfg:
-        return 1 # Expection: easy function if there is no graph
+        return 1  # No graph: assume trivially small.
 
-    # estimation heuristic:
-    # We estimate complexity based on number of nodes and edges in the CFG. 
-    # We weight the number of nodes and edges.
-    # Edges are often a better indicator of complexity (if/else, loops).
+    # Estimation heuristic:
+    # Base the complexity on CFG nodes/edges; edges often capture branching constructs.
 
     num_nodes = function_cfg.number_of_nodes()
     num_edges = function_cfg.number_of_edges()
 
-    # Cyclomatic complexity: a classic metric for code complexity
-    # Formula: E - N + 2P (edges - nodes + 2 * number of exits)
-    # Simplified for our purposes:
+    # Cyclomatic complexity: E - N + 2P (simplified here).
     complexity_score = (num_edges * 1.5) + (num_nodes * 1.0)
 
-    # Scaling factor: you would need to determine this factor empirically on your dataset,
-    # but we can start with a simple assumption.
-    # E.g.: 1 complexity point ≈ 5 C-tokens
+    # Scale factor (approximate): assume 1 complexity point ≈ 5 C tokens.
     estimated_tokens = complexity_score * 5.0
     
     return estimated_tokens
@@ -645,7 +639,6 @@ def real_c_code_lookup(func_obj, project):
 
     return None
 
-# TODO: 
 def decompile_context_function_to_c(func_obj, project, model): 
     """
     Decompiles the given function object to C code using the project's decompiler.
@@ -653,7 +646,6 @@ def decompile_context_function_to_c(func_obj, project, model):
     
     pass
 
-# TODO: 
 def add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget): 
     """
     Adds a decompiled candidate to the context functions, updating the budget.
@@ -675,7 +667,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
     Choses context functions based on the heuristic strategy within a token budget.
     """
     current_budget = budget - target_func_data['token_count']
-    if current_budget <= 0: # TODO: what if target_func_tokens exceed budget?
+    if current_budget <= 0:  # TODO: handle cases where the target alone exceeds the budget.
         return []
     
     try:
@@ -693,22 +685,20 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
         REDUCTION_LEVEL = 0
 
     if REDUCTION_LEVEL == 2:
-        # 3. If token size exceeds threshold 2 (80/90% of max tokens), then reduce the context amount.. not sure how yet. 
-        # 3a. Possible would be to split the target function into multiple !!decompilable!! parts.
+        # TODO: Define a strategy when tokens exceed ~80-90% of the budget (e.g., split targets).
         pass
     elif REDUCTION_LEVEL == 1:
-        # 2. If token size exceeds threshold 1 (40% of max tokens), then decompile some context functions first
+        # Target is large: attempt a hybrid context strategy.
         print("INFO: Target function is large. Applying 'Hybrid Context' strategy.")
 
-        # TODO: implement the hybrid-context-strategy here:
-        # 1. score all candidate functions based on existing scoring system
+        # Step 1: score candidates with the existing scoring system.
         context_funcs = []
         remaining_candidates = context_candidates_data['all_functions'].copy()
         
         for candidate in remaining_candidates:
             candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map, target_addr)
 
-        # 2. estimate c token size for first five important candidates (check if decompilation is possible without reduction first)
+        # Step 2: estimate C token size for the top candidates and decide between assembly vs C.
         important_candidates = sorted(
             remaining_candidates,
             key=lambda x: -x.get('score', 0)
@@ -727,16 +717,16 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
                 continue
 
             estimated_c_token_size = estimate_c_token_complexity(candidate['function_obj'])
-            #TODO: c_token count broken!!
+            # TODO: tighten C-token estimation; current heuristic is coarse.
 
             if estimated_c_token_size <= current_budget:
-                # TODO access the current mode from project or pass as parameter??
+                # TODO: access the current mode from the project or pass explicitly.
                 should_try_real_code = mode == "train" and random.random() < 0.25
                 c_approx = real_c_code_lookup(candidate['function_obj'], project) if should_try_real_code else None
                 if c_approx is None and mode == "train":
-                    c_approx = decompile_context_function_to_c(candidate['function_obj'], project, old_model=None) # TODO insert model here
+                    c_approx = decompile_context_function_to_c(candidate['function_obj'], project, old_model=None)  # TODO: hook actual model.
                 else:
-                    c_approx = decompile_context_function_to_c(candidate['function_obj'], project, actual_model=None) # TODO insert model here
+                    c_approx = decompile_context_function_to_c(candidate['function_obj'], project, actual_model=None)  # TODO: hook actual model.
                 candidate['c_approx'] = c_approx
                 current_budget = add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
                 continue
@@ -760,7 +750,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
             if current_degree is None:
                 break
             
-            # TODO: Process all candidates OR prioritize first within lower degree levels?
+            # TODO: Decide whether to always iterate lower-degree groups first.
             degree_group = [c for c in remaining_candidates if c.get('degree') == current_degree]
             if not degree_group:
                 remaining_candidates = [c for c in remaining_candidates if c.get('degree') != current_degree]
@@ -769,7 +759,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
             # if current_budget >= total_tokens_current_degree:
             #     process_degree_group(degree_group, context_funcs, remaining_candidates, current_budget)
 
-            # Prioritize: Attempts to add candidates from this degree_group, returning the updated budget and a flag (True=stop) if no further progress is possible.
+            # Prioritize candidates from this degree group; stop if nothing fits.
             for candidate in remaining_candidates:
                 candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map, target_addr)
             current_budget, should_break = add_remaining_candidates_to_context(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)

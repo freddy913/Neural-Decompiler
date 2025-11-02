@@ -32,6 +32,10 @@ from AsmNormalizer import join_semicolon, normalize_model_input_with_context_gro
 
 import os, re, sys, time
 
+INPUT_DIR = os.path.join(".", "INPUT")
+FUNCTION_TXT_PATH = os.path.join(INPUT_DIR, FUNCTION_TXT)
+ASSEMBLY_TXT_PATH = os.path.join(INPUT_DIR, ASSEMBLY_TXT)
+
 def build_prompt_and_write_debug(
     target_func_data,
     context_funcs,
@@ -146,7 +150,8 @@ def _compact_label(label):
     return _one_line(body)
 
 def init_pair_files():
-    for p in (FUNCTION_TXT, ASSEMBLY_TXT):
+    os.makedirs(INPUT_DIR, exist_ok=True)
+    for p in (FUNCTION_TXT_PATH, ASSEMBLY_TXT_PATH):
         try: os.unlink(p)
         except FileNotFoundError: pass
         open(p, "w", encoding="utf-8").close()
@@ -158,12 +163,12 @@ def append_pair(model_input, label_c_code):
         print(f"[SKIP] asm_len={len(asm)} label_len={len(lbl)}"); sys.stdout.flush()
         return False
 
-    with open(ASSEMBLY_TXT, "a", encoding="utf-8") as af:
+    with open(ASSEMBLY_TXT_PATH, "a", encoding="utf-8") as af:
         af.write(asm + "\n")
         af.flush()
         os.fsync(af.fileno())
 
-    with open(FUNCTION_TXT, "a", encoding="utf-8") as ff:
+    with open(FUNCTION_TXT_PATH, "a", encoding="utf-8") as ff:
         ff.write(lbl + "\n")
         ff.flush()
         os.fsync(ff.fileno())

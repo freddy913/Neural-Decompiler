@@ -1,5 +1,60 @@
+import os
+import re
+import string
+
 import angr
-from config import MYTOKENIZER
+from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_REG_RIP
+
+from Config import MYTOKENIZER
+
+STREAM_STDERR = "STREAM_STDERR"
+STREAM_STDOUT = "STREAM_STDOUT"
+
+_LABEL_DEBUG = os.environ.get("LABEL_DEBUG") == "1"
+
+_PLT_SUFFIX_RE = re.compile(r'@plt$', re.IGNORECASE)
+_LIBC_ALIAS_MAP_RAW = {
+    "__printf_chk": "printf",
+    "__fprintf_chk": "fprintf",
+    "__sprintf_chk": "sprintf",
+    "__snprintf_chk": "snprintf",
+    "__puts_chk": "puts",
+    "__putchar_chk": "putchar",
+    "__fwrite_chk": "fwrite",
+    "__fputs_chk": "fputs",
+    "__libc_system": "system",
+    "__libc_write": "write",
+    "__libc_send": "send",
+    "__libc_recv": "recv",
+    "__libc_exit": "exit",
+    "__libc_fwrite": "fwrite",
+    "__libc_fputs": "fputs",
+    "__libc_fprintf": "fprintf",
+    "__libc_printf": "printf",
+    "__libc_puts": "puts",
+    "__libc_perror": "perror",
+    "__libc_putc": "putchar",
+    "__libc_putchar": "putchar",
+    "__libc_exit_group": "exit",
+    "_exit": "exit",
+    "exit": "exit",
+}
+_LIBC_ALIAS_MAP = {k.lower(): v for k, v in _LIBC_ALIAS_MAP_RAW.items()}
+
+
+def _normalize_symbol_generic(sym: str | None) -> str:
+    if not sym:
+        return ""
+    base = sym.strip()
+    base = base.split('@@', 1)[0]
+    base = _PLT_SUFFIX_RE.sub("", base)
+    if '@' in base:
+        base = base.split('@', 1)[0]
+    base = base.strip()
+    if not base:
+        return ""
+    key = base.lower()
+    return _LIBC_ALIAS_MAP.get(key, key)
 
 def load_project(binary_path):
     """
@@ -16,7 +71,7 @@ def load_project(binary_path):
     try:
         cfg = project.analyses.CFGEmulated(
             normalize=True,
-            context_sensitivity_level=2,  # Wichtig für genaue Call-Site-Analyse
+            context_sensitivity_level=2,  # Higher sensitivity improves call-site resolution.
             resolve_indirect_jumps=True
         )
     except Exception as e:
@@ -47,9 +102,9 @@ def get_function_assembly(func):
     lines = []
     for block in func.blocks:
         try:
-            capstone_block = block.capstone  # CapstoneBlock
+            capstone_block = block.capstone
         except Exception:
-            continue  # skip blocks we can’t lift
+            continue  # Skip blocks we cannot lift.
 
         lines.append(f"Block @ {hex(block.addr)}")
         insns = getattr(capstone_block, "insns", [])
@@ -485,4 +540,3 @@ def collect_constant_pool_for_function(func_obj, project):
                 print(f"  {addr}  {info['kind']:4}  {repr(info['text'][:60])}  ->  {info['placeholder']}")
 
     return final_pool
-

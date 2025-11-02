@@ -1,7 +1,13 @@
-# -------------------------------
-# SECTION 5: Assembly preprocessing (model input normalizer)
-# -------------------------------
+'''
+ Assembly preprocessing (model input normalizer)
+'''
+
+import os
 import re
+import weakref
+from bisect import bisect_left
+
+from ElfFeatures import _function_symbol_addrs
 
 _LABEL_DEBUG = os.environ.get("LABEL_DEBUG") == "1"
 _CALL_RESOLVE_RADIUS = 48
@@ -117,12 +123,12 @@ def _build_call_symbol_map(project) -> dict[int, str]:
         except Exception:
             pass
 
-    # augment with import map that already normalizes + ensures @plt
+    # Augment with import map that already normalizes names and enforces @plt suffix.
     mapping.update(_function_symbol_addrs(project))
     return mapping
 
 def _tighten_commas_semicolons(s: str) -> str:
-    # Kein Space um ',' und ';'
+    # Remove spaces around ',' and ';'.
     s = re.sub(r'\s*,\s*', ',', s)
     s = re.sub(r'\s*;\s*', ';', s)
     return s
@@ -140,7 +146,7 @@ def join_semicolon(seq: list[str]) -> str:
     return re.sub(r'\s+', ' ', joined).strip()
 
 def _drop_block_lines(s: str) -> bool:
-    # alles wie "Block @ 0x...." raus
+    # Filter out markers such as "Block @ 0x...".
     if "Block @" in s:
         return True
     if re.match(r'^\s*;;;?\s*Block\s*@', s, re.IGNORECASE):
@@ -212,16 +218,16 @@ def _resolve_call_symbol(project, abs_or_text: str) -> str | None:
     return None
 
 def _rewrite_calls(line: str, project) -> str:
-    # call 0x.... -> call printf@plt | call foo | call <FUNC>
+    # Rewrite 'call 0x...' into a resolved symbol when possible, fallback to <FUNC>.
     def _sub(mm):
         sym = _resolve_call_symbol(project, mm.group(0))
         return f"call {sym}" if sym else "call <FUNC>"
     return re.sub(r'\bcall\s+0x[0-9a-fA-F]+', _sub, line)
 
-# einfache Symbol-Extraktion aus "call printf@plt"
+# Simple symbol extraction from "call printf@plt".
 _CALL_SYM_RE = re.compile(r'\bcall\s+([_a-zA-Z0-9@._]+)\b')
 
-# erkennt STRx..., FMTx..., CMDx..., DATx...
+# Matches STRx..., FMTx..., CMDx..., DATx... placeholders.
 _PLACEHOLDER_RE = re.compile(r'\b(?:STR|FMT|CMD|DAT)x[0-9a-fA-F]+\b')
 _RIP_REL_OPERAND_RE = re.compile(r'\[rip\s*(?P<sign>[+-])\s*0x(?P<hex>[0-9a-fA-F]+)\]', re.IGNORECASE)
 _PTR_TO_PLACEHOLDER_RE = re.compile(
@@ -273,7 +279,7 @@ def _as_placeholder(tok: str) -> str | None:
     return m.group(0) if m else None
 
 def _looks_stderr_stdout(s: str) -> str | None:
-    # häufig erscheinen Symbole als Kommentar in objdump-Zeilen:
+    # Symbols often appear in objdump comments, e.g.
     # "lea rdi, [rip + 0x... ]   # ... <_IO_2_1_stderr_+0x..>"
     low = s.lower()
     if "stderr" in low:
@@ -312,13 +318,13 @@ def _track_simple_reg_moves(line: str, reg_state: dict[str,str]) -> None:
             reg_state[reg] = val
         return
 
-    # direkter Platzhalter?
+    # Direct placeholder?
     ph = _as_placeholder(rhs)
     if ph:
         reg_state[reg] = ph
         return
 
-    # stream aus Symbolkommentar?
+    # Placeholder derived from a comment?
     st = _looks_stderr_stdout(line)
     if st:
         reg_state[reg] = st
@@ -329,8 +335,8 @@ def _track_simple_reg_moves(line: str, reg_state: dict[str,str]) -> None:
         reg_state[reg] = st_rhs
         return
 
-    # falls [rip+0x..] NICHT zu STR/FMT/... wurde, nichts tun (ofs-Mapping kommt später)
-    # Optional: nackte 'STREAM_*' übernehmen (falls vorher schon injiziert)
+    # If [rip+0x..] did not resolve to a placeholder leave it for the ofs-mapping step.
+    # Optionally propagate explicit STREAM_* markers injected earlier.
     if "STREAM_STDERR" in rhs or "STREAM_STDOUT" in rhs:
         reg_state[reg] = STREAM_STDERR if "STDERR" in rhs else STREAM_STDOUT
         return
@@ -417,7 +423,7 @@ def _fuse_libc_calls(seq_lines: list[str]) -> list[str]:
         callee = _normalize_libc_printf_symbol(raw_callee)
         fam = _LIBC_PRINTF_FAMILY.get(callee)
 
-        # rückwärts im kleinen Fenster Argumente tracken (System V: rdi, rsi, rdx, rcx, r8, r9)
+        # Track arguments backwards inside a small window (System V: rdi, rsi, rdx, rcx, r8, r9).
         reg_state: dict[str,str] = {}
         win_start = max(0, i - _FUSE_LOOKBACK)
         for j in range(win_start, i):
@@ -460,7 +466,7 @@ def _fuse_libc_calls(seq_lines: list[str]) -> list[str]:
                 return None
             return val.strip().lower()
 
-        # Arg-Extraktion
+        # Helper to read the tracked value for a given register.
         def _arg(reg: str):
             return reg_state.get(reg)
 
@@ -498,7 +504,7 @@ def _fuse_libc_calls(seq_lines: list[str]) -> list[str]:
             stream = _arg("rdi")
             fmt    = _arg("rsi")
             if not stream:
-                # versuche aus Call-Zeilenkommentar abzulesen (stderr/stdout)
+                # Try to infer stream from the call-site comment (stderr/stdout).
                 stream = _stream_from_regs("rdi")
             if fmt and _PLACEHOLDER_RE.match(fmt):
                 if stream in _STREAM_TOKENS:
@@ -507,9 +513,9 @@ def _fuse_libc_calls(seq_lines: list[str]) -> list[str]:
                     fused = f"fprintf({STREAM_UNKNOWN},{fmt})"
 
         elif fname in ("sprintf","snprintf","dprintf"):
-            # wir interessieren uns v. a. für den Format-/String-Arg
-            # sprintf(buf, fmt)  / snprintf(buf,n,fmt) / dprintf(fd,fmt)
-            # -> suche letzten String-Placeholder in rsi/rdx/rcx
+            # Focus on the format/string argument.
+            # sprintf(buf, fmt) / snprintf(buf,n,fmt) / dprintf(fd,fmt)
+            # -> look for the last string placeholder in rsi/rdx/rcx.
             candidates = [_arg("rsi"), _arg("rdx"), _arg("rcx")]
             ph = next((x for x in candidates if x and _PLACEHOLDER_RE.match(x)), None)
             if ph:
@@ -596,7 +602,7 @@ def _fuse_libc_calls(seq_lines: list[str]) -> list[str]:
             i += 1
             continue
 
-        # kein Fuse gelungen
+        # Fusing failed; keep the original line.
         out.append(line)
         i += 1
 
@@ -636,7 +642,7 @@ def _replace_rip_rel_with_pool(line: str, const_pool: dict) -> str:
                 _dbg(f"rip-replace: {match.group(0)} -> {placeholder} via {source or 'unknown'} (disp={disp_val:+#x})")
             return placeholder
 
-        # kein Placeholder gefunden -> visuell etwas kompakter machen
+        # No placeholder found; trim whitespace for readability.
         return match.group(0).replace(" ", "")
 
     new_line = _RIP_REL_OPERAND_RE.sub(_sub, line)
@@ -660,46 +666,46 @@ def _ofs_map_for_function(lines: list[str]) -> dict[str, str]:
             next_id += 1
         return key_to_id[key]
 
-    # Kandidaten erkennen
+    # Collect displacement candidates.
     for s in lines:
-        # fs:0x28 unberührt lassen
+        # Leave fs:0x28 untouched.
         if "fs:" in s:
             continue
-        # [rsp+0x..], [rbp-0x..], [r??+imm], [addr]
+        # Match [rsp+0x..], [rbp-0x..], [r??+imm], [addr], etc.
         for m in re.finditer(r'\[(?:[^\]]*?)\]', s):
             key = m.group(0)
-            if "rip" in key:   # RIP wurde separat behandelt (Pool)
+            if "rip" in key:   # RIP was handled via the constant pool.
                 continue
             _assign(key)
 
-        # nackte immediates in MEM-Kontext (selten) -> als Key lassen
+        # Rare bare immediates used in memory operands also become keys.
         for m in re.finditer(r'\b0x[0-9a-fA-F]+\b', s):
-            # Nicht wieder fs-canary erwischen
+            # Avoid picking up the fs canary again.
             if "fs:" in s:
                 continue
-            # nur wenn es wie Displacement wirkt (heuristisch: Nachbar ist PTR)
+            # Only treat it as displacement if the line references PTR.
             if "PTR" in s:
                 _assign(m.group(0))
 
     return key_to_id
 
 def _apply_ofs_map(line: str, ofs_map: dict[str, str]) -> str:
-    # fs:0x28 nicht verändern
+    # Leave fs:0x28 unchanged.
     if "fs:" in line:
         return line
 
-    # Brackets → ofsK, Größenangaben beibehalten, Operandenform vereinheitlichen
+    # Replace bracket expressions with ofsK while keeping operand shape.
     def _repl_bracket(m):
         key = m.group(0)
         k = ofs_map.get(key, None)
         if not k:
             return key
-        # Beispiel: 'QWORD PTR ofs0' – wir ersetzen die gesamte eckige Klammer
+        # Example: turn "[QWORD PTR ...]" into "ofs0".
         return k
 
     line = re.sub(r'\[(?:[^\]]*?)\]', _repl_bracket, line)
 
-    # Wenn noch nackte Adress-Immediates (mit PTR in Zeile) vorkommen → ofs
+    # Replace remaining bare address immediates (when paired with PTR) with ofsK.
     def _repl_hex(mm):
         key = mm.group(0)
         k = ofs_map.get(key, None)
@@ -714,7 +720,7 @@ def _rewrite_branches_to_labels(lines: list[str]) -> list[str]:
     jcc/jmp 0x...  -> jcc @jmpN
     Am Ziel erster Instruktion '...@jmpN' als Suffix hinzufügen.
     """
-    # 1) branch targets sammeln
+    # 1) Collect branch targets.
     jcc_pat = re.compile(r'\b(j[a-z]{1,3})\s+0x[0-9a-fA-F]+', re.IGNORECASE)
     jmp_pat = re.compile(r'\bjmp\s+0x[0-9a-fA-F]+', re.IGNORECASE)
     addr_pat = re.compile(r'0x[0-9a-fA-F]+')
@@ -728,11 +734,11 @@ def _rewrite_branches_to_labels(lines: list[str]) -> list[str]:
             a = addr_pat.search(mm.group(0))
             if a: targets.append(a.group(0))
 
-    # stabile Reihenfolge, dedup
+    # Preserve order and deduplicate targets.
     targets = list(dict.fromkeys(targets))
     idx_map = {addr: i for i, addr in enumerate(targets)}  # 0..N → @jmpN
 
-    # 2) branches umschreiben
+    # 2) Rewrite branch operands.
     out = []
     for s in lines:
         def _br_sub(mm):
@@ -746,11 +752,10 @@ def _rewrite_branches_to_labels(lines: list[str]) -> list[str]:
         s2 = re.sub(r'\bjmp\s+0x[0-9a-fA-F]+', _br_sub, s2, flags=re.IGNORECASE)
         out.append(s2)
 
-    # 3) Zielmarken als Suffix in erste Instruktion mit dieser Adresse
-    #    Wir erkennen die "erste Instruktion mit der Zieladresse" über die Originalzeile – hier
-    #    haben wir die Adresspräfixe schon entfernt; pragmatisch: wir hängen die Label Suffixe
-    #    einfach an die NACHFOLGENDE Zeile, sobald wir den alten Blocktrenner los sind.
-    #    (Falls du die Basic Blocks inkl. Startadresse hast, ersetze diese Heuristik mit echter Block-Map.)
+    # 3) Append the label suffix to the first instruction that lands on the target.
+    #    We approximate this by attaching the suffix to the following line
+    #    once block markers have been stripped.
+    #    (If real basic-block metadata is available, prefer that over this heuristic.)
     if not idx_map:
         return out
 
@@ -797,7 +802,7 @@ def normalize_model_input_with_context_groups(
 ) -> str:
     """
     Baut den Einzeiler im Format:
-      HEADERS:#include A,#include B TARGET:endbr64;...; BY endbr64;caller...; TO endbr64;callee...;
+      HEADERS:#include A,#include B TARGET:instr;...; BY caller...; TO callee...;
     und führt VORHER alle Preprocessing-Schritte durch:
       - Block @ ... raus, Adresspräfixe raus
       - call-Ziele auflösen (PLT/Symtab), sonst <FUNC>
@@ -809,11 +814,11 @@ def normalize_model_input_with_context_groups(
     lines = _tokenize_model_input(raw_text)
 
     includes = []
-    groups = []  # [(name, seq_lines)], Reihenfolge: TARGET, optional "BY" (als Marker), Caller-Gruppen, optional "TO" (Marker), Callee-Gruppen
+    groups = []  # [(name, seq_lines)] ordered as: target, optional BY marker, caller groups, optional TO marker, callee groups.
     cur = []
-    section = None  # 'target' | 'caller' | 'callee' | None
+    section = None  # Tracks the current section ('target', 'caller', 'callee', or None).
 
-    # Gruppieren
+    # Group lines by section.
     for s in lines:
         if s.startswith("HEADERS:"):
             continue
@@ -836,7 +841,7 @@ def normalize_model_input_with_context_groups(
                 groups.append(("TO", []))
                 section = None
                 continue
-            # Callee:
+            # Callee section header.
             if cur and section:
                 groups.append((section, cur)); cur = []
             section = 'callee'
@@ -858,7 +863,7 @@ def normalize_model_input_with_context_groups(
             groups.append((section, cur))
             cur = []
 
-        # Schrittweise Normalisierung pro Zeile
+        # Normalize each line step by step.
         s = _replace_rip_rel_with_pool(s, const_pool_for_target)
         s = _rewrite_calls(s, project)
 
@@ -867,7 +872,7 @@ def normalize_model_input_with_context_groups(
     if cur and section:
         groups.append((section, cur))
 
-    # Jetzt pro Bereich (target/caller/callee) ofs-Mapping + Branch-Rewrite ausführen
+    # Normalize each section (target/caller/callee) and apply ofs/branch rewrites.
     def _norm_seq(seq: list[str]) -> str:
         if not seq:
             return ""
@@ -876,41 +881,35 @@ def normalize_model_input_with_context_groups(
         seq2 = _cut_after_function_end(seq2)
         ofs_map = _ofs_map_for_function(seq2)
         seq3 = [_apply_ofs_map(x, ofs_map) for x in seq2]
-        # Zusammenbauen zu 'endbr64;...' (falls nicht vorhanden, voranstellen)
-        joined = ";".join(seq3)
-        joined = re.sub(r'\s+', ' ', joined).strip()
-        if not joined.lower().startswith("endbr64"):
-            joined = "endbr64;" + joined
+        joined = join_semicolon(seq3)
+        if not joined:
+            return ""
         return _tighten_commas_semicolons(joined)
 
     parts = []
     if includes:
         parts.append("HEADERS:" + ",".join(includes))
 
-    # TARGET zuerst
+    # Emit TARGET first.
     for name, seq in groups:
         if name == "target":
             parts.append("TARGET:" + _norm_seq(seq))
             break
 
-    # BY + alle caller-Gruppen
+    # Emit caller and callee groups with their markers.
     for name, seq in groups:
         if name == "caller":
             grp = _norm_seq(seq)
             if grp:
-                if not grp.lower().startswith("endbr64"):
-                    grp = "endbr64;" + grp
                 parts.append("BY")
                 parts.append(grp)
         elif name == "callee":
             grp = _norm_seq(seq)
             if grp:
-                if not grp.lower().startswith("endbr64"):
-                    grp = "endbr64;" + grp
                 parts.append("TO")
                 parts.append(grp)
 
     out = " ".join([p for p in parts if p])
-    # Final tightening (falls irgendwo noch Spaces um , ;)
+    # Final tightening in case stray spaces around commas/semicolons remain.
     out = _tighten_commas_semicolons(out)
     return out
