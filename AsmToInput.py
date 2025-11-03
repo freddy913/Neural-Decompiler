@@ -151,6 +151,8 @@ def build_prompt_and_write_debug(
     (Context Functions + <TARGET_SEP> + Target Function)
     """
 
+    context_funcs = context_funcs or []
+
     target_name = target_func_data.get('name') 
     target_segment = target_func_data.get('assembly', '').strip()
     
