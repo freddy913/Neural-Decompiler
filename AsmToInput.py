@@ -1,4 +1,5 @@
 import argparse
+import json
 import os, re, sys, time
 
 import Config
@@ -40,6 +41,104 @@ from AddrMap import build_addr2line_resolver
 INPUT_DIR = os.path.join(".", "INPUT")
 FUNCTION_TXT_PATH = os.path.join(INPUT_DIR, FUNCTION_TXT)
 ASSEMBLY_TXT_PATH = os.path.join(INPUT_DIR, ASSEMBLY_TXT)
+CHUNK_STATE_ROOT = os.path.join(".", "CHUNK_STATE")
+
+def _chunk_slug(value):
+    if not value:
+        return "target"
+    return re.sub(r"[^0-9A-Za-z_]+", "_", value)
+
+def persist_chunk_state(sample):
+    chunk_plan = sample.get("chunk_plan") or []
+    if not chunk_plan:
+        return None
+
+    target_slug = _chunk_slug(sample.get("target_function_name"))
+    binary_path = sample.get("binary_path")
+    try:
+        rel_bin = os.path.relpath(binary_path) if binary_path else None
+    except Exception:
+        rel_bin = binary_path
+    binary_slug = _chunk_slug(rel_bin) if rel_bin else "binary"
+    slug = f"{target_slug}__{binary_slug}"
+    state_dir = os.path.join(CHUNK_STATE_ROOT, slug)
+    os.makedirs(state_dir, exist_ok=True)
+
+    state_payload = {
+        "binary_path": sample.get("binary_path"),
+        "target_function": sample.get("target_function_name"),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "chunk_strategy": sample.get("chunk_strategy"),
+        "slug": slug,
+        "expected_output_files": [f"{entry.get('name')}.c" for entry in chunk_plan],
+        "chunks": [
+            {
+                "index": entry.get("index"),
+                "name": entry.get("name"),
+                "token_count": entry.get("token_count"),
+                "assembly_file": f"{entry.get('name')}_assembly.txt",
+            }
+            for entry in chunk_plan
+        ],
+    }
+
+    state_path = os.path.join(state_dir, "chunk_state.json")
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump(state_payload, f, indent=2)
+
+    for entry in chunk_plan:
+        assembly_path = os.path.join(state_dir, f"{entry['name']}_assembly.txt")
+        with open(assembly_path, "w", encoding="utf-8") as af:
+            af.write(entry["assembly"])
+
+    return state_path
+
+def combine_chunk_outputs(chunk_plan, outputs_dir, target_name, binary_path=None, output_dir=None):
+    if not chunk_plan or not outputs_dir:
+        return None
+
+    if not os.path.isdir(outputs_dir):
+        print(f"[WARN] Chunk output directory '{outputs_dir}' does not exist.")
+        return None
+
+    target_slug = _chunk_slug(target_name)
+    try:
+        rel_bin = os.path.relpath(binary_path) if binary_path else None
+    except Exception:
+        rel_bin = binary_path
+    binary_slug = _chunk_slug(rel_bin) if rel_bin else None
+    slug = f"{target_slug}__{binary_slug}" if binary_slug else target_slug
+
+    if output_dir is None:
+        output_dir = outputs_dir
+    os.makedirs(output_dir, exist_ok=True)
+
+    combined_parts = []
+    missing = []
+
+    for entry in chunk_plan:
+        expected_file = f"{entry['name']}.c"
+        chunk_path = os.path.join(outputs_dir, expected_file)
+        if not os.path.exists(chunk_path):
+            missing.append(expected_file)
+            continue
+        with open(chunk_path, "r", encoding="utf-8", errors="ignore") as cf:
+            combined_parts.append(cf.read().strip())
+
+    if not combined_parts:
+        print("[WARN] No chunk outputs were found to combine.")
+        if missing:
+            print(f"[WARN] Missing chunk outputs: {', '.join(missing)}")
+        return None
+
+    combined_path = os.path.join(output_dir, f"{slug}_combined.c")
+    with open(combined_path, "w", encoding="utf-8") as out_f:
+        out_f.write("\n\n".join(part for part in combined_parts if part))
+
+    if missing:
+        print(f"[WARN] Missing chunk outputs: {', '.join(missing)}")
+
+    return combined_path
 
 def build_prompt_and_write_debug(
     target_func_data,
@@ -256,6 +355,10 @@ def build_sample(mode="train"):
         mode,
         target_src_loc=target_src_loc,
     )
+    context_funcs = context_funcs or []
+
+    chunk_plan = target_func_data.get("chunk_plan")
+    chunk_strategy = target_func_data.get("chunk_strategy")
 
     header_block = build_header_block_from_binary(TARGET_BINARY_PATH)
 
@@ -280,6 +383,11 @@ def build_sample(mode="train"):
         "target_function_name": TARGET_FUNCTION_NAME,
         "model_input": formatted_input,
     }
+
+    if chunk_plan:
+        sample["chunk_plan"] = chunk_plan
+    if chunk_strategy:
+        sample["chunk_strategy"] = chunk_strategy
 
     if mode == "train":
         real_src = real_c_code_lookup(target_func, project)
@@ -358,6 +466,12 @@ def main():
         action="store_true",
         help="Process all binaries inside the COMPILED directory (train mode recommended)",
     )
+    parser.add_argument(
+        "--chunk-output-dir",
+        type=str,
+        default=None,
+        help="Optional directory containing per-chunk C outputs to merge after inference.",
+    )
 
     args = parser.parse_args()
 
@@ -386,6 +500,26 @@ def main():
                 print(f"[WARN] Skipping '{binary_path}': build_sample returned no result.")
                 continue
 
+            chunk_state_path = None
+            chunk_plan = result.get("chunk_plan")
+            if chunk_plan:
+                chunk_state_path = persist_chunk_state(result)
+                if chunk_state_path:
+                    print(f"[Chunk] State saved to {chunk_state_path}")
+                expected_files = ", ".join(f"{entry['name']}.c" for entry in chunk_plan)
+                if expected_files:
+                    print(f"[Chunk] Expected output files: {expected_files}")
+                if args.chunk_output_dir:
+                    combined_path = combine_chunk_outputs(
+                        chunk_plan,
+                        args.chunk_output_dir,
+                        result.get("target_function_name"),
+                        binary_path=result.get("binary_path"),
+                        output_dir=args.chunk_output_dir,
+                    )
+                    if combined_path:
+                        print(f"[Chunk] Combined output saved to {combined_path}")
+
             if mode == "train":
                 label = result.get('label_c_code')
                 if not label:
@@ -409,6 +543,11 @@ def main():
     if result is None:
         return
 
+    chunk_plan = result.get("chunk_plan")
+    chunk_state_path = None
+    if chunk_plan:
+        chunk_state_path = persist_chunk_state(result)
+
     if mode == "train":
         init_pair_files()
         label = result.get('label_c_code')
@@ -428,6 +567,24 @@ def main():
         print(f"ContextRole: {result['context_role']}")
         print(f"Target function: {result['target_function_name']}")
         print(f"Model input:\n{result['model_input']}")
+
+    if chunk_plan:
+        print("\n--- Chunk Plan ---")
+        for entry in chunk_plan:
+            print(f"Part {entry['index']}: {entry['token_count']} tokens -> {entry['name']}")
+        if chunk_state_path:
+            print(f"Chunk state saved to: {chunk_state_path}")
+        if args.chunk_output_dir:
+            combined_path = combine_chunk_outputs(
+                chunk_plan,
+                args.chunk_output_dir,
+                result.get("target_function_name"),
+                binary_path=result.get("binary_path"),
+            )
+            if combined_path:
+                print(f"Combined chunk output written to: {combined_path}")
+        expected_files = ", ".join(f"{entry['name']}.c" for entry in chunk_plan)
+        print(f"Expected chunk output files (for AI results): {expected_files}")
 
 if __name__ == "__main__":
     main()

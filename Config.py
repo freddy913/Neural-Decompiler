@@ -15,7 +15,7 @@ TARGET_FUNCTION_NAME = "main"
 # TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED/abhishek070193_mapreduce/executable2"
 # TARGET_FUNCTION_NAME = "newRuntimeException"
 
-CONTEXT_THRESHOLD_TOKENS = 10000 # TODO: substract puffer for label tokens later in post processing
+CONTEXT_THRESHOLD_TOKENS = 1800 # TODO: substract puffer for label tokens later in post processing
 MYTOKENIZER = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B") # TODO: dummy,.. replace with actual tokenizer
 JUNK_FUNCTIONS = {"printf", "malloc", "free", "scanf", "puts", "gets", "exit", "socket", "sendto", "close", "setuid", "setsockopt",
     "strlen", "perror", "getpid", "inet_aton", "gethostbyname", "strtol"}

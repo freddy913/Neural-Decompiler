@@ -191,6 +191,38 @@ def is_leaf_function(func, callgraph):
     except Exception:
         return False
 
+def split_target_into_chunks(target_func_data, tokenizer=MYTOKENIZER, max_chunk_tokens=3500, max_chunks=3):
+    """
+    Split assembly text into chunks bounded by token count limits.
+    Returns list of assembly snippets.
+    """
+    asm = target_func_data.get("assembly", "") or ""
+    if not asm:
+        return []
+
+    lines = asm.splitlines()
+    chunks: list[str] = []
+    current_lines: list[str] = []
+
+    for line in lines:
+        current_lines.append(line)
+        joined = "\n".join(current_lines)
+        try:
+            tok_count = len(tokenizer(joined, add_special_tokens=False).input_ids)
+        except Exception:
+            tok_count = max(len(joined) // 4, 1)
+
+        if tok_count >= max_chunk_tokens:
+            chunks.append(joined)
+            current_lines = []
+            if len(chunks) >= max_chunks:
+                break
+
+    if current_lines and len(chunks) < max_chunks:
+        chunks.append("\n".join(current_lines))
+
+    return chunks
+
 def extract_struct_fingerprint(assembly: str):
     # sehr grob TODO
     offs = set()
@@ -710,8 +742,88 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
         REDUCTION_LEVEL = 0
 
     if REDUCTION_LEVEL == 2:
-        # TODO: Define a strategy when tokens exceed ~80-90% of the budget (e.g., split targets).
-        pass
+        print("INFO: Target function nearly fills the budget; applying chunked-target strategy.")
+
+        chunk_token_budget = max(int(budget * 0.4), 1)
+        chunks = split_target_into_chunks(
+            target_func_data,
+            tokenizer=MYTOKENIZER,
+            max_chunk_tokens=chunk_token_budget,
+            max_chunks=3,
+        )
+
+        if not chunks:
+            print("INFO: Chunking produced no segments; returning without context.")
+            target_func_data["chunk_plan"] = []
+            target_func_data["chunk_strategy"] = {
+                "reduction_level": 2,
+                "max_chunk_tokens": chunk_token_budget,
+                "applied": False,
+            }
+            return []
+
+        target_name = target_func_data.get("name") or "target_function"
+        target_obj = all_functions_map.get(target_addr)
+
+        chunk_plan = []
+        context_entries = []
+        skipped_chunks = []
+
+        for idx, chunk in enumerate(chunks, start=1):
+            try:
+                chunk_tokens = len(MYTOKENIZER(chunk, add_special_tokens=False).input_ids)
+            except Exception:
+                chunk_tokens = max(len(chunk) // 4, 1)
+
+            entry_name = f"{target_name}_part{idx}"
+
+            plan_entry = {
+                "index": idx,
+                "name": entry_name,
+                "assembly": chunk,
+                "token_count": chunk_tokens,
+            }
+            chunk_plan.append(plan_entry)
+
+            if idx > 1:
+                context_entries.append({
+                    "function_obj": target_obj,
+                    "name": entry_name,
+                    "assembly": chunk,
+                    "token_count": chunk_tokens,
+                    "degree": 0,
+                    "role": "caller",
+                    "is_leaf": True,
+                    "append_mode": "assembly",
+                    "score": 9999,
+                    "origin": "target_chunk",
+                })
+
+        main_entry = chunk_plan[0]
+        target_func_data["assembly"] = main_entry["assembly"]
+        target_func_data["token_count"] = main_entry["token_count"]
+        target_func_data["chunk_plan"] = chunk_plan
+        target_func_data["chunk_strategy"] = {
+            "reduction_level": 2,
+            "max_chunk_tokens": chunk_token_budget,
+            "applied": True,
+        }
+
+        remaining_budget = max(budget - main_entry["token_count"], 0)
+        selected_context = []
+
+        for entry in context_entries:
+            tokens = entry.get("token_count", 0)
+            if tokens <= remaining_budget:
+                selected_context.append(entry)
+                remaining_budget -= tokens
+            else:
+                skipped_chunks.append(entry.get("name"))
+
+        if skipped_chunks:
+            target_func_data["chunk_strategy"]["skipped_chunks"] = skipped_chunks
+
+        return selected_context
     elif REDUCTION_LEVEL == 1:
         # Target is large: attempt a hybrid context strategy.
         print("INFO: Target function is large. Applying 'Hybrid Context' strategy.")
