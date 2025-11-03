@@ -896,17 +896,25 @@ def normalize_model_input_with_context_groups(
             parts.append("TARGET:" + _norm_seq(seq))
             break
 
-    # Emit caller and callee groups with their markers.
+    added_by = False
+    added_to = False
+
     for name, seq in groups:
         if name == "caller":
             grp = _norm_seq(seq)
             if grp:
-                parts.append("BY")
+                if not added_by:
+                    parts.append("BY")
+                    added_by = True
                 parts.append(grp)
-        elif name == "callee":
+
+    for name, seq in groups:
+        if name == "callee":
             grp = _norm_seq(seq)
             if grp:
-                parts.append("TO")
+                if not added_to:
+                    parts.append("TO")
+                    added_to = True
                 parts.append(grp)
 
     out = " ".join([p for p in parts if p])
