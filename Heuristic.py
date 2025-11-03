@@ -1,5 +1,4 @@
 import os
-import random
 import re
 import shutil
 import subprocess
@@ -192,6 +191,15 @@ def is_leaf_function(func, callgraph):
     except Exception:
         return False
 
+def extract_struct_fingerprint(assembly: str):
+    # sehr grob TODO
+    offs = set()
+    for line in assembly.splitlines():
+        m = re.search(r'\[rdi\+0x([0-9a-fA-F]+)\]', line)
+        if m:
+            offs.add(int(m.group(1), 16))
+    return offs
+
 def build_candidate_func_data(candidate_funcs, project, cfg, tokenizer=MYTOKENIZER):
     """
     takes the raw candidates (func_obj, degree, role), extracts the assembly and token counts
@@ -220,6 +228,7 @@ def build_candidate_func_data(candidate_funcs, project, cfg, tokenizer=MYTOKENIZ
             'role': role,
             'is_leaf': is_leaf,
             'score': BASIC_SCORE,
+            'struct_fp': extract_struct_fingerprint(func_data["assembly"]), 
         }
 
         candidate_func_data['all_functions'].append(entry)
@@ -435,7 +444,7 @@ def _candidate_func_calls_target(candidate_addr, cg, target_addr):
     except Exception:
         return False
 
-def _calculate_candidate_score(candidate, callgraph, all_program_funcs, target_addr):
+def _calculate_candidate_score(candidate, callgraph, all_program_funcs, target_addr, target_struct_fp=None, target_src_loc=None):
     """
     Score a context candidate (higher = better).
     """
@@ -446,6 +455,12 @@ def _calculate_candidate_score(candidate, callgraph, all_program_funcs, target_a
     # 2) Bonus for directly calling the target.
     if _candidate_func_calls_target(candidate['function_obj'].addr, callgraph, target_addr):
         candidate['score'] += 30
+
+    # 2b) Bonus for struct fingerprint overlap.
+    if target_struct_fp and candidate.get("struct_fp"):
+        overlap = target_struct_fp & candidate["struct_fp"]
+        if overlap:
+            candidate['score'] += 15 + 2*len(overlap)
 
     # 3) Penalize complex functions (non-junk callees).
     num_callees = _count_non_junk_callees(candidate['function_obj'], callgraph, all_program_funcs, JUNK_FUNCTIONS)
@@ -458,7 +473,15 @@ def _calculate_candidate_score(candidate, callgraph, all_program_funcs, target_a
     c_token_count = candidate.get('token_count', 0)
     candidate['score'] -= c_token_count / 100
 
-    return candidate['score']
+    if target_src_loc:
+        cand_src = candidate.get("src_loc")
+        if cand_src:
+            tgt_file = target_src_loc.split(":", 1)[0]
+            cand_file = cand_src.split(":", 1)[0]
+            if tgt_file == cand_file:
+                candidate["score"] += 12
+    return candidate["score"]
+
 
 def add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget):
     token_count = candidate.get('token_count', 0)
@@ -662,13 +685,15 @@ def add_decompiled_candidate_to_context(remaining_candidates, context_funcs, can
         current_budget -= token_count
     return current_budget
 
-def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph, all_functions_map, target_addr, project, mode):
+def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph, all_functions_map, target_addr, project, mode, target_src_loc=None):
     """
     Choses context functions based on the heuristic strategy within a token budget.
     """
     current_budget = budget - target_func_data['token_count']
     if current_budget <= 0:  # TODO: handle cases where the target alone exceeds the budget.
         return []
+    
+    target_struct_fp = extract_struct_fingerprint(target_func_data.get("assembly",""))
     
     try:
         total_context_tokens = context_candidates_data.get('total_token_count', 0)
@@ -696,7 +721,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
         remaining_candidates = context_candidates_data['all_functions'].copy()
         
         for candidate in remaining_candidates:
-            candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map, target_addr)
+            candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map, target_addr, target_struct_fp=target_struct_fp, target_src_loc=target_src_loc,)
 
         # Step 2: estimate C token size for the top candidates and decide between assembly vs C.
         important_candidates = sorted(
@@ -720,21 +745,17 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
             # TODO: tighten C-token estimation; current heuristic is coarse.
 
             if estimated_c_token_size <= current_budget:
-                # TODO: access the current mode from the project or pass explicitly.
-                should_try_real_code = mode == "train" and random.random() < 0.25
-                c_approx = real_c_code_lookup(candidate['function_obj'], project) if should_try_real_code else None
-                if c_approx is None and mode == "train":
-                    c_approx = decompile_context_function_to_c(candidate['function_obj'], project, old_model=None)  # TODO: hook actual model.
-                else:
-                    c_approx = decompile_context_function_to_c(candidate['function_obj'], project, actual_model=None)  # TODO: hook actual model.
-                candidate['c_approx'] = c_approx
-                current_budget = add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
+                # Prefer real source if available; skip experimental decompilation path.
+                c_approx = real_c_code_lookup(candidate['function_obj'], project) if mode == "train" else None
+                if c_approx:
+                    candidate['c_approx'] = c_approx
+                    current_budget = add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
                 continue
             continue
 
         if current_budget > 0 and remaining_candidates:
             for candidate in remaining_candidates:
-                candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map, target_addr)
+                candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map, target_addr, target_struct_fp=target_struct_fp, target_src_loc=target_src_loc,)
 
             current_budget, should_break = add_remaining_candidates_to_context(remaining_candidates, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
 
@@ -761,7 +782,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
 
             # Prioritize candidates from this degree group; stop if nothing fits.
             for candidate in remaining_candidates:
-                candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map, target_addr)
+                candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map, target_addr, target_struct_fp=target_struct_fp, target_src_loc=target_src_loc,)
             current_budget, should_break = add_remaining_candidates_to_context(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
 
             if should_break:

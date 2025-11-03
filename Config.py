@@ -10,10 +10,11 @@ logging.getLogger('angr').setLevel('WARNING')
 # Global configs
 # TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED/0x00-0x00_shell_scripts/executable0"
 # TARGET_FUNCTION_NAME = "main"
-# TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED/2dango_Custom-UDP-packet/executable0"
-# TARGET_FUNCTION_NAME = "main"
-TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED/agargiulo_sparsify/executable0"
+TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED/2dango_Custom-UDP-packet/executable0"
 TARGET_FUNCTION_NAME = "main"
+# TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED/abhishek070193_mapreduce/executable2"
+# TARGET_FUNCTION_NAME = "newRuntimeException"
+
 CONTEXT_THRESHOLD_TOKENS = 10000 # TODO: substract puffer for label tokens later in post processing
 MYTOKENIZER = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B") # TODO: dummy,.. replace with actual tokenizer
 JUNK_FUNCTIONS = {"printf", "malloc", "free", "scanf", "puts", "gets", "exit", "socket", "sendto", "close", "setuid", "setsockopt",

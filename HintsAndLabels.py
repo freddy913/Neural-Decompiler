@@ -127,6 +127,29 @@ def build_signature_from_die(die, cu, dwarf_info):
     sig = f"{ret_type_name} {func_name}({param_list});"
     return sig
 
+def extract_types_from_o(o_path):
+    types = []
+    with open(o_path, "rb") as f:
+        elf = ELFFile(f)
+        if not elf.has_dwarf_info():
+            return types
+        dwarf_info = elf.get_dwarf_info()
+        for cu in dwarf_info.iter_CUs():
+            top = cu.get_top_DIE()
+            for die in top.iter_children():
+                if die.tag in ("DW_TAG_structure_type", "DW_TAG_union_type"):
+                    name_attr = die.attributes.get("DW_AT_name")
+                    if not name_attr:
+                        continue
+                    name = name_attr.value.decode("utf-8", "ignore")
+                    types.append({
+                        "name": name,
+                        "o_path": o_path,
+                        "die": die,
+                        "cu": cu,
+                        "dwarf_info": dwarf_info,
+                    })
+    return types
 
 def extract_functions_from_o(o_path):
     '''
@@ -190,17 +213,24 @@ def build_dwarf_lookup_for_repo(compiled_dir_root):
     ]
     '''
     func_to_o = {} 
+    type_to_o = {}
 
     for root, dirs, files in os.walk(compiled_dir_root):
         for fn in files:
-            if fn.endswith(".o"):
-                o_path = os.path.join(root, fn)
-                dwarf_funcs = extract_functions_from_o(o_path)
-                for f_name, func_infos in dwarf_funcs.items():
-                    for info in func_infos:
-                        func_to_o.setdefault(f_name, []).append(info)
+            if not fn.endswith(".o"):
+                continue
+            o_path = os.path.join(root, fn)
+            dwarf_funcs = extract_functions_from_o(o_path)
+            for f_name, func_infos in dwarf_funcs.items():
+                for info in func_infos:
+                    func_to_o.setdefault(f_name, []).append(info)
 
-    return func_to_o
+            dwarf_types = extract_types_from_o(o_path)
+            for type_info in dwarf_types:
+                type_name = type_info["name"]
+                type_to_o.setdefault(type_name, []).append(type_info)
+
+    return { "functions": func_to_o, "types": type_to_o }
 
 
 def build_signature_hint_from_lookup(func_name, dwarf_lookup):
@@ -208,7 +238,10 @@ def build_signature_hint_from_lookup(func_name, dwarf_lookup):
     Look up a function name in the aggregated DWARF lookup.
     Return one signature string if available, else None.
     '''
-    lst = dwarf_lookup.get(func_name)
+    if not dwarf_lookup:
+        return None
+    func_map = dwarf_lookup.get("functions", dwarf_lookup)
+    lst = func_map.get(func_name)
     if not lst:
         return None
     return lst[0].get("signature_hint")

@@ -1,3 +1,8 @@
+import argparse
+import os, re, sys, time
+
+import Config
+
 from Config import (
     TARGET_BINARY_PATH,
     TARGET_FUNCTION_NAME,
@@ -30,7 +35,7 @@ from ElfFeatures import (
 
 from AsmNormalizer import join_semicolon, normalize_model_input_with_context_groups
 
-import os, re, sys, time
+from AddrMap import build_addr2line_resolver
 
 INPUT_DIR = os.path.join(".", "INPUT")
 FUNCTION_TXT_PATH = os.path.join(INPUT_DIR, FUNCTION_TXT)
@@ -188,7 +193,12 @@ def build_sample(mode="train"):
         print("Failed to load the binary project or CFG.")
         return
 
+    addr2line = build_addr2line_resolver(TARGET_BINARY_PATH)
+
+
     target_func = next(cfg.functions.get_by_name(TARGET_FUNCTION_NAME), None)
+    target_src_loc = addr2line(target_func.addr) if target_func else None
+
     if target_func is None:
         print(f"Function '{TARGET_FUNCTION_NAME}' not found.")
         return
@@ -230,6 +240,11 @@ def build_sample(mode="train"):
     print("\n--- Extracting Assembly Code ---")
 
     target_func_data = get_function_data(target_func, project, MYTOKENIZER)
+
+    for entry in candidate_func_data["all_functions"]:
+        fobj = entry["function_obj"]
+        entry["src_loc"] = addr2line(fobj.addr)
+
     context_funcs = apply_heuristic(
         target_func_data,
         candidate_func_data,
@@ -238,7 +253,8 @@ def build_sample(mode="train"):
         all_functions_map,
         TARGET_FUNC_ADDR,
         project,
-        mode
+        mode,
+        target_src_loc=target_src_loc,
     )
 
     header_block = build_header_block_from_binary(TARGET_BINARY_PATH)
@@ -292,25 +308,126 @@ def build_sample(mode="train"):
 
     return sample
 
-def main():
+def _set_target_config(binary_path, function_name):
+    Config.TARGET_BINARY_PATH = binary_path
+    Config.TARGET_FUNCTION_NAME = function_name
 
-    result = build_sample(
-        mode="train"
+    global TARGET_BINARY_PATH, TARGET_FUNCTION_NAME
+    TARGET_BINARY_PATH = binary_path
+    TARGET_FUNCTION_NAME = function_name
+
+def _iter_compiled_binaries(compiled_root):
+    if not os.path.isdir(compiled_root):
+        print(f"[WARN] Compiled directory '{compiled_root}' does not exist.")
+        return
+
+    for repo_name in sorted(os.listdir(compiled_root)):
+        repo_path = os.path.join(compiled_root, repo_name)
+        if not os.path.isdir(repo_path):
+            continue
+
+        for root, _, files in os.walk(repo_path):
+            for fname in sorted(files):
+                if re.match(r"^executable\d+$", fname):
+                    yield repo_name, os.path.join(root, fname)
+            # executables are expected directly under repo subdirectories; no need to walk deeper
+            break
+
+def main():
+    parser = argparse.ArgumentParser(description="Run decompiler pipeline")
+    parser.add_argument(
+        "--mode",
+        choices=["train", "infer"],
+        default="train",
+        help="Mode: train for dataset generation, infer for analysis",
     )
+    parser.add_argument(
+        "--binary-path",
+        type=str,
+        default=Config.TARGET_BINARY_PATH,
+        help="Path to the target binary",
+    )
+    parser.add_argument(
+        "--function-name",
+        type=str,
+        default=Config.TARGET_FUNCTION_NAME,
+        help="Name of the target function in the binary",
+    )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Process all binaries inside the COMPILED directory (train mode recommended)",
+    )
+
+    args = parser.parse_args()
+
+    mode = args.mode
+
+    if args.batch:
+        compiled_root = os.path.join(os.path.dirname(__file__), "COMPILED")
+
+        if mode == "train":
+            init_pair_files()
+
+        processed = 0
+        successes = 0
+
+        for repo_name, binary_path in _iter_compiled_binaries(compiled_root):
+            processed += 1
+            print(f"\n=== [{processed}] Processing {repo_name}: {binary_path} ===")
+            try:
+                _set_target_config(binary_path, args.function_name)
+                result = build_sample(mode=mode)
+            except Exception as exc:
+                print(f"[WARN] Failed to process '{binary_path}': {exc}")
+                continue
+
+            if result is None:
+                print(f"[WARN] Skipping '{binary_path}': build_sample returned no result.")
+                continue
+
+            if mode == "train":
+                label = result.get('label_c_code')
+                if not label:
+                    print(f"[WARN] Skipping '{binary_path}': no label generated in train mode.")
+                    continue
+                append_pair(model_input=result['model_input'], label_c_code=label)
+                successes += 1
+            else:
+                print(f"ContextRole: {result['context_role']}")
+                print(f"Target function: {result['target_function_name']}")
+                print(f"Model input:\n{result['model_input']}")
+                successes += 1
+
+        print(f"\nBatch processing complete. Succeeded: {successes}/{processed}")
+        return
+
+    _set_target_config(args.binary_path, args.function_name)
+
+    result = build_sample(mode=mode)
 
     if result is None:
         return
-    
-    init_pair_files()
 
-    append_pair(model_input=result['model_input'], label_c_code=result['label_c_code'])
+    if mode == "train":
+        init_pair_files()
+        label = result.get('label_c_code')
+        if not label:
+            print("[WARN] No label generated in train mode; skipping pair write.")
+            return
 
-    print("\n--- Final Transformer Input ---")
-    print(f"ContextRole: {result['context_role']}")
-    print(f"Target function: {result['target_function_name']}")
-    print(f"Input tokens preview:\n{result['model_input']}")
-    if "label_c_code" in result:
-        print(f"\nLabel preview:\n{result['label_c_code']}")
+        append_pair(model_input=result['model_input'], label_c_code=label)
+
+        print("\n--- Final Transformer Input ---")
+        print(f"ContextRole: {result['context_role']}")
+        print(f"Target function: {result['target_function_name']}")
+        print(f"Input tokens preview:\n{result['model_input']}")
+        print(f"\nLabel preview:\n{label}")
+    else:
+        print("\n--- Inference Mode Output ---")
+        print(f"ContextRole: {result['context_role']}")
+        print(f"Target function: {result['target_function_name']}")
+        print(f"Model input:\n{result['model_input']}")
 
 if __name__ == "__main__":
     main()
