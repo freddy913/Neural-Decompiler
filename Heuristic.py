@@ -698,7 +698,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
     try:
         total_context_tokens = context_candidates_data.get('total_token_count', 0)
         if current_budget > total_context_tokens:
-            return context_candidates_data['all_functions', []].copy()
+            return context_candidates_data.get('all_functions', []).copy()
     except Exception as e:
         pass
 
