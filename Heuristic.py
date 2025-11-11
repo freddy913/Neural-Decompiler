@@ -5,6 +5,7 @@ import subprocess
 
 from ElfFeatures import get_function_data, get_token_count
 from Config import BASIC_SCORE, DEGREE, JUNK_FUNCTIONS, MYTOKENIZER, RUNTIME_ENTRY_FUNCTIONS
+from HintsAndLabels import pick_best_match
 
 '''
 SECTION: Candidate Selection Heuristic
@@ -609,88 +610,261 @@ def estimate_c_token_complexity(func):
     estimated_tokens = complexity_score * 5.0
     
     return estimated_tokens
+    
+def _decode_dwarf_str(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "ignore")
+    return value
 
-def real_c_code_lookup(func_obj, project):
-    """
-    Retrieves the real C code for training purposes.
-    """
-    func_name = getattr(func_obj, "name", None)
+
+def _extract_function_from_source(src_text, func_name):
+    if not src_text or not func_name:
+        return None
+
+    if not re.search(rf'\b{re.escape(func_name)}\s*\(', src_text):
+        return None
+
+    sig_regex = re.compile(
+        rf'([A-Za-z0-9_\*\s]+?\b{re.escape(func_name)}\s*\([^;]*\)\s*\{{)',
+        re.MULTILINE,
+    )
+    match = sig_regex.search(src_text)
+    if not match:
+        return None
+
+    start_idx = match.start()
+    brace_depth = 0
+    i = start_idx
+    n = len(src_text)
+    in_string = False
+    string_char = None
+
+    while i < n:
+        ch = src_text[i]
+
+        if in_string:
+            if ch == string_char:
+                in_string = False
+            elif ch == "\\":
+                i += 1
+        else:
+            if ch in ('"', "'"):
+                in_string = True
+                string_char = ch
+            elif ch == "{":
+                brace_depth += 1
+            elif ch == "}":
+                brace_depth -= 1
+                if brace_depth == 0:
+                    end_idx = i + 1
+                    snippet = src_text[start_idx:end_idx]
+                    return snippet.lstrip()
+        i += 1
+
+    return None
+
+
+def _load_file_text(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _scan_dir_for_func_once(dir_path, func_name):
+    if not dir_path or not os.path.isdir(dir_path):
+        return None
+    for fname in os.listdir(dir_path):
+        if not fname.endswith(".c"):
+            continue
+        full_path = os.path.join(dir_path, fname)
+        text = _load_file_text(full_path)
+        if not text:
+            continue
+        snippet = _extract_function_from_source(text, func_name)
+        if snippet:
+            return snippet
+    return None
+
+
+def _resolve_source_path_from_die(candidate, binary_path=None):
+    die = candidate.get("die") if candidate else None
+    cu = candidate.get("cu") if candidate else None
+    dwarf_info = candidate.get("dwarf_info") if candidate else None
+    if not die or not cu or not dwarf_info:
+        return None
+
+    try:
+        line_program = dwarf_info.line_program_for_CU(cu)
+    except Exception:
+        line_program = None
+
+    if not line_program:
+        return None
+
+    file_attr = die.attributes.get("DW_AT_decl_file")
+    if not file_attr:
+        return None
+
+    file_index = file_attr.value
+    try:
+        file_entry = line_program["file_entry"][file_index - 1]
+    except Exception:
+        return None
+
+    file_name = _decode_dwarf_str(getattr(file_entry, "name", None))
+    if not file_name:
+        return None
+
+    dir_candidates = []
+
+    dir_index = getattr(file_entry, "dir_index", 0)
+    try:
+        include_dirs = line_program["include_directory"]
+    except Exception:
+        include_dirs = []
+    if dir_index and dir_index - 1 < len(include_dirs):
+        dir_entry = _decode_dwarf_str(include_dirs[dir_index - 1])
+        if dir_entry:
+            dir_candidates.append(dir_entry)
+
+    comp_dir_attr = cu.get_top_DIE().attributes.get("DW_AT_comp_dir")
+    comp_dir = _decode_dwarf_str(comp_dir_attr.value) if comp_dir_attr else None
+    if comp_dir:
+        dir_candidates.append(comp_dir)
+
+    repo_path = None
+    o_path = candidate.get("o_path")
+    if o_path:
+        repo_path = os.path.dirname(o_path)
+        if repo_path:
+            repo_path = repo_path.replace("/COMPILED/", "/C_COMPILE/", 1)
+            dir_candidates.append(repo_path)
+
+    if binary_path and "/COMPILED/" in binary_path:
+        repo_dir = os.path.dirname(binary_path).replace("/COMPILED/", "/C_COMPILE/", 1)
+        dir_candidates.append(repo_dir)
+
+    potential_paths = []
+    if os.path.isabs(file_name):
+        potential_paths.append(os.path.normpath(file_name))
+    else:
+        for base in dir_candidates:
+            if not base:
+                continue
+            joined = os.path.normpath(os.path.join(base, file_name))
+            potential_paths.append(joined)
+        potential_paths.append(os.path.normpath(file_name))
+
+    normalized_paths = []
+    for path in potential_paths:
+        if not path:
+            continue
+        normalized_paths.append(path)
+        if "/COMPILED/" in path:
+            normalized_paths.append(path.replace("/COMPILED/", "/C_COMPILE/", 1))
+
+    for candidate_path in normalized_paths:
+        if candidate_path and os.path.isfile(candidate_path):
+            return candidate_path
+
+    return None
+
+
+def _extract_source_text_from_die(candidate, binary_path=None):
+    if not candidate:
+        return None
+
+    func_name_attr = candidate.get("die").attributes.get("DW_AT_name") if candidate.get("die") else None
+    func_name = _decode_dwarf_str(func_name_attr.value) if func_name_attr else None
     if not func_name:
         return None
-    
-    if func_name.startswith("__"):
+
+    source_path = _resolve_source_path_from_die(candidate, binary_path=binary_path)
+    if not source_path:
         return None
+
+    try:
+        with open(source_path, "r", encoding="utf-8", errors="ignore") as handle:
+            source_text = handle.read()
+    except OSError:
+        return None
+
+    return _extract_function_from_source(source_text, func_name)
+
+
+def get_real_c_code(
+    func_obj,
+    project,
+    *,
+    purpose="target",
+    source_hint=None,
+    dwarf_lookup=None,
+    max_recursive_depth=2,
+):
+    """
+    Resolve the most reliable C-source snippet for func_obj.
+
+    purpose="target": strict, rely on explicit hints/derived dirs/DWARF.
+    purpose="context": allow guarded recursive search nearby.
+    """
+    func_name = getattr(func_obj, "name", None)
+    if not func_name or func_name.startswith("__"):
+        return None
+
+    def _try_file(path):
+        text = _load_file_text(path)
+        if not text:
+            return None
+        return _extract_function_from_source(text, func_name)
+
+    if source_hint:
+        snippet = _try_file(source_hint)
+        if snippet:
+            return snippet
 
     binary_path = getattr(project, "filename", None)
     if binary_path is None:
         try:
             binary_path = project.loader.main_object.binary
         except Exception:
-            return None
-        
-    c_path_dir = binary_path.replace("/COMPILED/", "/C_COMPILE/", 1)
-    c_path_dir = os.path.dirname(c_path_dir) + "/"
+            binary_path = None
 
-    if not os.path.isdir(c_path_dir):
-        return None
-    
-    candidate_source_text = None
+    c_base_dir = None
+    if binary_path and "/COMPILED/" in binary_path:
+        c_base_dir = binary_path.replace("/COMPILED/", "/C_COMPILE/", 1)
+        c_base_dir = os.path.dirname(c_base_dir)
 
-    for fname in os.listdir(c_path_dir):
-        if not fname.endswith(".c"):
-            continue
-        full_path = os.path.join(c_path_dir, fname)
-        try:
-            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-                src = f.read()
-        except Exception:
-            continue
+    if c_base_dir:
+        snippet = _scan_dir_for_func_once(c_base_dir, func_name)
+        if snippet:
+            return snippet
 
-        if not re.search(rf'\b{re.escape(func_name)}\s*\(', src):
-            continue
+    if dwarf_lookup:
+        func_map = dwarf_lookup.get("functions", dwarf_lookup)
+        candidates = func_map.get(func_name) if func_map else None
+        if candidates:
+            best_candidate = pick_best_match(candidates, binary_path or "")
+            snippet = _extract_source_text_from_die(best_candidate, binary_path=binary_path)
+            if snippet:
+                return snippet
 
-        sig_regex = re.compile(
-            rf'([A-Za-z0-9_\*\s]+?\b{re.escape(func_name)}\s*\([^;]*\)\s*\{{)',
-            re.MULTILINE
-        )
+    if purpose == "context" and c_base_dir:
+        for root, dirs, files in os.walk(c_base_dir):
+            rel = os.path.relpath(root, c_base_dir)
+            depth = 0 if rel in (".", "") else rel.count(os.sep) + 1
+            if depth > max_recursive_depth:
+                dirs[:] = []
+                continue
 
-
-        m = sig_regex.search(src)
-        if not m:
-            continue
-
-        start_idx = m.start()
-        brace_depth = 0
-        i = start_idx
-        n = len(src)
-        in_string = False
-        string_char = None
-        while i < n:
-            ch = src[i]
-
-            if in_string:
-                if ch == string_char:
-                    in_string = False
-                elif ch == '\\':
-                    i += 1
-            else:
-                if ch == '"' or ch == "'":
-                    in_string = True
-                    string_char = ch
-                elif ch == '{':
-                    brace_depth += 1
-                elif ch == '}':
-                    brace_depth -= 1
-                    if brace_depth == 0:
-                        end_idx = i + 1
-                        candidate_source_text = src[start_idx:end_idx]
-                        break
-
-            i += 1
-
-        if candidate_source_text is not None:
-            candidate_source_text = candidate_source_text.lstrip()
-            return candidate_source_text
+            for fname in files:
+                if not fname.endswith(".c"):
+                    continue
+                full_path = os.path.join(root, fname)
+                snippet = _try_file(full_path)
+                if snippet:
+                    return snippet
 
     return None
 
@@ -717,20 +891,33 @@ def add_decompiled_candidate_to_context(remaining_candidates, context_funcs, can
         current_budget -= token_count
     return current_budget
 
-def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph, all_functions_map, target_addr, project, mode, target_src_loc=None):
+def apply_heuristic(
+    target_func_data,
+    context_candidates_data,
+    budget,
+    callgraph,
+    all_functions_map,
+    target_addr,
+    project,
+    mode,
+    dwarf_lookup=None,
+    target_src_loc=None,
+):
     """
     Choses context functions based on the heuristic strategy within a token budget.
     """
+    context_candidates_data = context_candidates_data or {}
+    all_candidate_entries = context_candidates_data.get('all_functions', []) or []
     current_budget = budget - target_func_data['token_count']
     if current_budget <= 0:  # TODO: handle cases where the target alone exceeds the budget.
         return []
-    
+
     target_struct_fp = extract_struct_fingerprint(target_func_data.get("assembly",""))
     
     try:
         total_context_tokens = context_candidates_data.get('total_token_count', 0)
         if current_budget > total_context_tokens:
-            return context_candidates_data.get('all_functions', []).copy()
+            return all_candidate_entries.copy()
     except Exception as e:
         pass
 
@@ -830,7 +1017,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
 
         # Step 1: score candidates with the existing scoring system.
         context_funcs = []
-        remaining_candidates = context_candidates_data['all_functions'].copy()
+        remaining_candidates = all_candidate_entries.copy()
         
         for candidate in remaining_candidates:
             candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map, target_addr, target_struct_fp=target_struct_fp, target_src_loc=target_src_loc,)
@@ -858,7 +1045,16 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
 
             if estimated_c_token_size <= current_budget:
                 # Prefer real source if available; skip experimental decompilation path.
-                c_approx = real_c_code_lookup(candidate['function_obj'], project) if mode == "train" else None
+                c_approx = (
+                    get_real_c_code(
+                        candidate['function_obj'],
+                        project,
+                        purpose="context",
+                        dwarf_lookup=dwarf_lookup,
+                    )
+                    if mode == "train"
+                    else None
+                )
                 if c_approx:
                     candidate['c_approx'] = c_approx
                     current_budget = add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
@@ -875,7 +1071,7 @@ def apply_heuristic(target_func_data, context_candidates_data, budget, callgraph
 
     elif REDUCTION_LEVEL == 0:
         context_funcs = []
-        remaining_candidates = context_candidates_data['all_functions'].copy()
+        remaining_candidates = all_candidate_entries.copy()
 
         # Prioritize by iteratively adding candidates from the lowest-degree group one-by-one until the budget is exhausted, then repeat for the next-lowest degree group.
         while remaining_candidates and current_budget > 0:

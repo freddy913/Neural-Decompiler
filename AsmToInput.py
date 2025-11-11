@@ -1,6 +1,7 @@
 import argparse
 import json
 import os, re, sys, time
+import random
 
 import Config
 
@@ -15,8 +16,8 @@ from Config import (
 )
 
 from Heuristic import (
-    real_c_code_lookup, 
-    apply_heuristic, 
+    get_real_c_code,
+    apply_heuristic,
     get_context_candidates_with_degrees,
     filter_candidate_funcs_runtime_safe,
     build_candidate_func_data,
@@ -41,7 +42,44 @@ from AddrMap import build_addr2line_resolver
 INPUT_DIR = os.path.join(".", "INPUT")
 FUNCTION_TXT_PATH = os.path.join(INPUT_DIR, FUNCTION_TXT)
 ASSEMBLY_TXT_PATH = os.path.join(INPUT_DIR, ASSEMBLY_TXT)
+PAIR_JSONL_PATH = None
 CHUNK_STATE_ROOT = os.path.join(".", "CHUNK_STATE")
+
+
+def _binary_slug_from_path(binary_path: str) -> str:
+    """
+    Create a slug from the last two path components of the binary path.
+    Falls back to the last component and finally to 'sample' if unavailable.
+    """
+    normalized = os.path.normpath(binary_path or "")
+    parts = [part for part in normalized.split(os.sep) if part]
+    if not parts:
+        return "sample"
+
+    last_part = parts[-1]
+    base_name, extension = os.path.splitext(last_part)
+    last_component = base_name if extension else last_part
+
+    if len(parts) >= 2:
+        return f"{parts[-2]}_{last_component}"
+
+    return last_component or "sample"
+
+
+def _ensure_pair_jsonl_path() -> str:
+    """Resolve and cache the JSONL path for the current binary/function."""
+    global PAIR_JSONL_PATH
+    if PAIR_JSONL_PATH:
+        return PAIR_JSONL_PATH
+
+    slug = _binary_slug_from_path(TARGET_BINARY_PATH)
+    function_name = TARGET_FUNCTION_NAME or "target"
+    random_suffix = random.randint(0, 99)
+    filename = f"{slug}_{function_name}_{random_suffix}.jsonl"
+    PAIR_JSONL_PATH = os.path.join(INPUT_DIR, filename)
+    return PAIR_JSONL_PATH
+
+
 
 def _chunk_slug(value):
     if not value:
@@ -261,12 +299,24 @@ def init_pair_files():
         try: os.unlink(p)
         except FileNotFoundError: pass
         open(p, "w", encoding="utf-8").close()
+    global PAIR_JSONL_PATH
+    PAIR_JSONL_PATH = None
+
+def _append_pair_jsonl(asm_payload: str, lbl_payload: str):
+    """Append the provided pair as a JSONL entry."""
+    payload = {"input": asm_payload, "output": lbl_payload}
+    jsonl_path = _ensure_pair_jsonl_path()
+    os.makedirs(os.path.dirname(jsonl_path), exist_ok=True)
+    with open(jsonl_path, "a", encoding="utf-8") as pf:
+        json.dump(payload, pf)
+        pf.write("\n")
 
 def append_pair(model_input, label_c_code):
     asm  = _one_line(model_input)
-    lbl  = _compact_label(label_c_code)
-    if not asm or not lbl:
-        print(f"[SKIP] asm_len={len(asm)} label_len={len(lbl)}"); sys.stdout.flush()
+    lbl_full = (label_c_code or "").strip()
+    lbl_preview = _compact_label(label_c_code)
+    if not asm or not lbl_full:
+        print(f"[SKIP] asm_len={len(asm)} label_len={len(lbl_full)}"); sys.stdout.flush()
         return False
 
     with open(ASSEMBLY_TXT_PATH, "a", encoding="utf-8") as af:
@@ -275,27 +325,35 @@ def append_pair(model_input, label_c_code):
         os.fsync(af.fileno())
 
     with open(FUNCTION_TXT_PATH, "a", encoding="utf-8") as ff:
-        ff.write(lbl + "\n")
+        ff.write(lbl_full + "\n\n")
         ff.flush()
         os.fsync(ff.fileno())
 
-    print(f"[OK {time.strftime('%H:%M:%S')}] wrote pair: asm={len(asm)} chars, lbl={len(lbl)} chars")
+    _append_pair_jsonl(asm, lbl_full)
+
+    print(f"[OK {time.strftime('%H:%M:%S')}] wrote pair: asm={len(asm)} chars, lbl={len(lbl_full)} chars")
+    if lbl_preview and lbl_preview != lbl_full:
+        print(f"         label preview: {lbl_preview[:96]}{'…' if len(lbl_preview) > 96 else ''}")
     sys.stdout.flush()
     return True
 
-def build_sample(mode="train"):
+def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_lookup=None):
     """
     mode:
     'train' - build sample for training
     'infer' - build sample for inference
     """
+    if not os.path.isfile(TARGET_BINARY_PATH):
+        print(f"[ERR] Binary '{TARGET_BINARY_PATH}' not found. Build/compile the target before running build_sample.")
+        return
+
     project, cfg = load_project(TARGET_BINARY_PATH)
+
     if project is None or cfg is None:
         print("Failed to load the binary project or CFG.")
         return
 
     addr2line = build_addr2line_resolver(TARGET_BINARY_PATH)
-
 
     target_func = next(cfg.functions.get_by_name(TARGET_FUNCTION_NAME), None)
     target_src_loc = addr2line(target_func.addr) if target_func else None
@@ -305,59 +363,66 @@ def build_sample(mode="train"):
         return
 
     TARGET_FUNC_ADDR = target_func.addr
+    
     all_functions_map = {func.addr: func for func in cfg.functions.values()}
     print(f"\n--- Target function identified: '{TARGET_FUNCTION_NAME}' at {hex(target_func.addr)} ---")
 
-    context_candidates = get_context_candidates_with_degrees(target_func, cfg)
-    caller_degrees = context_candidates['callers']
-    callee_degrees = context_candidates['callees']
-
-    candidate_funcs = (
-        [(func, degree, 'caller') for func, degree in caller_degrees.items()] +
-        [(func, degree, 'callee') for func, degree in callee_degrees.items()]
-    )
-
-    print("\n--- Context Analysis (Generation 1) ---")
-    print(f"Found {len(context_candidates['callers'])} unique calling function(s):")
-    for caller in sorted(list(context_candidates['callers']), key=lambda f: f.name):
-        print(f"  - '{caller.name}'")
-        
-    print(f"\nFound {len(context_candidates['callees'])} unique called function(s):")
-    for callee in sorted(list(context_candidates['callees']), key=lambda f: f.name):
-        print(f"  - '{callee.name}'")
-
-    seen_addresses = set()
-    deduped_candidates = []
-    for func, degree, role in candidate_funcs:
-        if func.addr not in seen_addresses:
-            deduped_candidates.append((func, degree, role))
-            seen_addresses.add(func.addr)
-
-    candidate_funcs_filtered = filter_candidate_funcs_runtime_safe(deduped_candidates, target_func)
-    print(f"\nAfter runtime-safe filtering, {len(candidate_funcs_filtered)} candidate functions remain...")
-
-    candidate_func_data = build_candidate_func_data(candidate_funcs_filtered, project, cfg, MYTOKENIZER)
-
-    print("\n--- Extracting Assembly Code ---")
-
     target_func_data = get_function_data(target_func, project, MYTOKENIZER)
+    context_funcs = []
 
-    for entry in candidate_func_data["all_functions"]:
-        fobj = entry["function_obj"]
-        entry["src_loc"] = addr2line(fobj.addr)
+    dwarf_ref = dwarf_lookup
+    if mode == "train" and dwarf_ref is None:
+        dwarf_ref = build_dwarf_lookup_for_repo(os.path.dirname(TARGET_BINARY_PATH))
 
-    context_funcs = apply_heuristic(
-        target_func_data,
-        candidate_func_data,
-        CONTEXT_THRESHOLD_TOKENS,
-        cfg.functions.callgraph,
-        all_functions_map,
-        TARGET_FUNC_ADDR,
-        project,
-        mode,
-        target_src_loc=target_src_loc,
-    )
-    context_funcs = context_funcs or []
+    if UseContext == "true":
+        context_candidates = get_context_candidates_with_degrees(target_func, cfg)
+        caller_degrees = context_candidates['callers']
+        callee_degrees = context_candidates['callees']
+
+        candidate_funcs = (
+            [(func, degree, 'caller') for func, degree in caller_degrees.items()] +
+            [(func, degree, 'callee') for func, degree in callee_degrees.items()]
+        )
+
+        print("\n--- Context Analysis (Generation 1) ---")
+        print(f"Found {len(context_candidates['callers'])} unique calling function(s):")
+        for caller in sorted(list(context_candidates['callers']), key=lambda f: f.name):
+            print(f"  - '{caller.name}'")
+            
+        print(f"\nFound {len(context_candidates['callees'])} unique called function(s):")
+        for callee in sorted(list(context_candidates['callees']), key=lambda f: f.name):
+            print(f"  - '{callee.name}'")
+
+        seen_addresses = set()
+        deduped_candidates = []
+        for func, degree, role in candidate_funcs:
+            if func.addr not in seen_addresses:
+                deduped_candidates.append((func, degree, role))
+                seen_addresses.add(func.addr)
+
+        candidate_funcs_filtered = filter_candidate_funcs_runtime_safe(deduped_candidates, target_func)
+        print(f"\nAfter runtime-safe filtering, {len(candidate_funcs_filtered)} candidate functions remain...")
+
+        candidate_func_data = build_candidate_func_data(candidate_funcs_filtered, project, cfg, MYTOKENIZER)
+
+        print("\n--- Extracting Assembly Code ---")
+
+        for entry in candidate_func_data["all_functions"]:
+            fobj = entry["function_obj"]
+            entry["src_loc"] = addr2line(fobj.addr)
+
+        context_funcs = apply_heuristic(
+            target_func_data,
+            candidate_func_data,
+            CONTEXT_THRESHOLD_TOKENS,
+            cfg.functions.callgraph,
+            all_functions_map,
+            TARGET_FUNC_ADDR,
+            project,
+            mode,
+            dwarf_lookup=dwarf_ref,
+            target_src_loc=target_src_loc,
+        ) or []
 
     chunk_plan = target_func_data.get("chunk_plan")
     chunk_strategy = target_func_data.get("chunk_strategy")
@@ -392,21 +457,25 @@ def build_sample(mode="train"):
         sample["chunk_strategy"] = chunk_strategy
 
     if mode == "train":
-        real_src = real_c_code_lookup(target_func, project)
+        real_src = get_real_c_code(
+            target_func,
+            project,
+            purpose="target",
+            source_hint=source_hint,
+            dwarf_lookup=dwarf_ref,
+        )
 
-        dwarf_lookup = build_dwarf_lookup_for_repo(os.path.dirname(TARGET_BINARY_PATH))
-
-        final_label = finalize_label_for_training(
+        formatted_output = finalize_label_for_training(
             getattr(target_func, "name", None),
             real_src,
             const_pool_target,
-            dwarf_lookup
+            dwarf_ref
         )
 
-        if final_label is None:
-            final_label = "/* NO_GROUND_TRUTH_AVAILABLE */"
+        if formatted_output is None:
+            formatted_output = "/* NO_GROUND_TRUTH_AVAILABLE */"
 
-        sample["label_c_code"] = final_label
+        sample["label_c_code"] = formatted_output
         sample["context_role"] = "train"
 
     elif mode == "infer":
@@ -422,9 +491,10 @@ def _set_target_config(binary_path, function_name):
     Config.TARGET_BINARY_PATH = binary_path
     Config.TARGET_FUNCTION_NAME = function_name
 
-    global TARGET_BINARY_PATH, TARGET_FUNCTION_NAME
+    global TARGET_BINARY_PATH, TARGET_FUNCTION_NAME, PAIR_JSONL_PATH
     TARGET_BINARY_PATH = binary_path
     TARGET_FUNCTION_NAME = function_name
+    PAIR_JSONL_PATH = None
 
 def _iter_compiled_binaries(compiled_root):
     if not os.path.isdir(compiled_root):
@@ -464,6 +534,12 @@ def main():
         help="Name of the target function in the binary",
     )
     parser.add_argument(
+        "--source-path",
+        type=str,
+        default=None,
+        help="Optional path hint to the original source file for the target function",
+    )
+    parser.add_argument(
         "--batch",
         action="store_true",
         help="Process all binaries inside the COMPILED directory (train mode recommended)",
@@ -475,9 +551,68 @@ def main():
         help="Optional directory containing per-chunk C outputs to merge after inference.",
     )
 
+    parser.add_argument(
+        "--UseContext",
+        choices=["true", "false"],
+        default="false",
+        help="Use Context: 'true' for adding context to the input string, 'false' for only the target as input"
+    )
+
+    parser.add_argument(
+        "--worklist",
+        type=str,
+        default=None,
+        help="Optional TSV file: each line 'ABS_BINARY_PATH<TAB>FUNCTION_NAME'"
+    )
+
     args = parser.parse_args()
 
     mode = args.mode
+    UseContext = args.UseContext
+    source_hint_arg = args.source_path
+
+    # ========= NEU: batch + worklist =========
+    if args.batch and args.worklist:
+        # wir verarbeiten DEINE liste, nicht den festen COMPILED/ baum
+        if mode == "train":
+            init_pair_files()
+
+        with open(args.worklist, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+
+        processed = 0
+        successes = 0
+        for line in lines:
+            processed += 1
+            # Format: /abs/path/to/executable0<TAB>funcname
+            parts = line.split("\t")
+            bin_path = parts[0]
+            func_name = parts[1] if len(parts) > 1 and parts[1] else args.function_name
+
+            print(f"\n=== [{processed}] Processing {bin_path} :: {func_name} ===")
+            try:
+                _set_target_config(bin_path, func_name)
+                result = build_sample(mode=mode, UseContext=UseContext, source_hint=source_hint_arg)
+            except Exception as exc:
+                print(f"[WARN] Failed to process '{bin_path}' / '{func_name}': {exc}")
+                continue
+
+            if result is None:
+                print(f"[WARN] build_sample returned no result.")
+                continue
+
+            if mode == "train":
+                label = result.get("label_c_code")
+                if not label:
+                    print(f"[WARN] no label generated; skipping pair write.")
+                    continue
+                append_pair(model_input=result["model_input"], label_c_code=label)
+
+            successes += 1
+
+        print(f"\nBatch (worklist) complete. Succeeded: {successes}/{processed}")
+        return
+    # ========= ENDE NEU =========
 
     if args.batch:
         compiled_root = os.path.join(os.path.dirname(__file__), "COMPILED")
@@ -493,7 +628,7 @@ def main():
             print(f"\n=== [{processed}] Processing {repo_name}: {binary_path} ===")
             try:
                 _set_target_config(binary_path, args.function_name)
-                result = build_sample(mode=mode)
+                result = build_sample(mode=mode, UseContext=UseContext, source_hint=source_hint_arg)
             except Exception as exc:
                 print(f"[WARN] Failed to process '{binary_path}': {exc}")
                 continue
@@ -540,7 +675,7 @@ def main():
 
     _set_target_config(args.binary_path, args.function_name)
 
-    result = build_sample(mode=mode)
+    result = build_sample(mode=mode, UseContext=UseContext, source_hint=source_hint_arg)
 
     if result is None:
         return
@@ -590,4 +725,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

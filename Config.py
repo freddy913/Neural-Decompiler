@@ -8,14 +8,13 @@ logging.getLogger('pyvex').setLevel('ERROR')
 logging.getLogger('angr').setLevel('WARNING')
 
 # Global configs
-# TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED/0x00-0x00_shell_scripts/executable0"
-# TARGET_FUNCTION_NAME = "main"
+
 TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED/2dango_Custom-UDP-packet/executable0"
 TARGET_FUNCTION_NAME = "main"
-# TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED/abhishek070193_mapreduce/executable2"
-# TARGET_FUNCTION_NAME = "newRuntimeException"
+# TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED/00test_preproc/executable0"
+# TARGET_FUNCTION_NAME = "main"
 
-CONTEXT_THRESHOLD_TOKENS = 1800 # TODO: substract puffer for label tokens later in post processing
+CONTEXT_THRESHOLD_TOKENS = 4096 # TODO: substract puffer for label tokens later in post processing
 MYTOKENIZER = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-1.3B") # TODO: dummy,.. replace with actual tokenizer
 JUNK_FUNCTIONS = {"printf", "malloc", "free", "scanf", "puts", "gets", "exit", "socket", "sendto", "close", "setuid", "setsockopt",
     "strlen", "perror", "getpid", "inet_aton", "gethostbyname", "strtol"}
@@ -31,3 +30,4 @@ DEGREE = 2  # Default degree for context candidate selection
 WRITE_DEBUG_FILES = False
 FUNCTION_TXT = "function.txt"
 ASSEMBLY_TXT = "assembly.txt"
+PAIR_JSON = "pair.json"
