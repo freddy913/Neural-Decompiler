@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import subprocess
+import random
 
 from ElfFeatures import get_function_data, get_token_count
 from Config import BASIC_SCORE, DEGREE, JUNK_FUNCTIONS, MYTOKENIZER, RUNTIME_ENTRY_FUNCTIONS
@@ -477,42 +478,385 @@ def _candidate_func_calls_target(candidate_addr, cg, target_addr):
     except Exception:
         return False
 
-def _calculate_candidate_score(candidate, callgraph, all_program_funcs, target_addr, target_struct_fp=None, target_src_loc=None):
+def _target_calls_candidate(target_addr, cg, candidate_addr):
+    """
+    Check if the target function directly calls the candidate function.
+    """
+    try:
+        return candidate_addr in cg.successors(target_addr)
+    except Exception:
+        return False
+
+def _get_block_and_insn_counts(func_obj):
+    """
+    Return (block_count, insn_count) for a function object.
+    """
+    if func_obj is None:
+        return None, None
+
+    try:
+        blocks = list(func_obj.blocks)
+    except Exception:
+        return None, None
+
+    insn_count = 0
+    for b in blocks:
+        try:
+            cap = b.capstone
+        except Exception:
+            continue
+        insn_count += len(getattr(cap, "insns", []))
+
+    return len(blocks), insn_count
+
+def _is_stub_like(func_obj):
+    """
+    Detect lightweight or stubby routines that should not receive caller/callee bonuses.
+    """
+    if func_obj is None:
+        return False
+
+    name = getattr(func_obj, "name", "") or ""
+    if name in JUNK_FUNCTIONS or name.startswith("__"):
+        return True
+
+    if getattr(func_obj, "is_plt", False):
+        return True
+
+    return _is_trampoline_or_tiny(func_obj)
+
+def _cfg_fingerprint(func_obj):
+    """
+    Build a coarse CFG fingerprint.
+    """
+    if func_obj is None:
+        return None
+
+    try:
+        g = func_obj.graph
+    except Exception:
+        return None
+
+    try:
+        nodes = g.number_of_nodes()
+        edges = g.number_of_edges()
+        branchy = sum(1 for n, deg in g.out_degree() if deg > 1)
+    except Exception:
+        return None
+
+    cyclomatic = max(edges - nodes + 1, 0)
+    branch_ratio = branchy / max(nodes, 1)
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "cyclomatic": cyclomatic,
+        "branch_ratio": branch_ratio,
+    }
+
+def _cfg_similarity_bonus(target_obj, candidate_obj, strong_threshold=0.7):
+    """
+    Grant a moderate bonus when CFG fingerprints are clearly similar.
+    """
+    tgt_fp = _cfg_fingerprint(target_obj)
+    cand_fp = _cfg_fingerprint(candidate_obj)
+    if not tgt_fp or not cand_fp:
+        return 0
+
+    diffs = []
+    for key in ("nodes", "edges", "cyclomatic"):
+        a = tgt_fp.get(key)
+        b = cand_fp.get(key)
+        if a is None or b is None:
+            continue
+        diffs.append(abs(a - b) / max(a, b, 1))
+
+    for key in ("branch_ratio",):
+        a = tgt_fp.get(key)
+        b = cand_fp.get(key)
+        if a is None or b is None:
+            continue
+        diffs.append(abs(a - b))
+
+    if not diffs:
+        return 0
+
+    avg_diff = sum(diffs) / len(diffs)
+    similarity = max(0.0, 1.0 - avg_diff)
+
+    if similarity >= strong_threshold:
+        return 10
+
+    return 0
+
+STOP_TOKENS = {
+    "init", "start", "stop", "helper", "func", "function", "handle", "process",
+    "do", "run", "main", "task", "worker", "thread", "loop", "call", "impl",
+    "util", "common", "generic", "default", "base",
+}
+
+def _split_identifiers(name: str):
+    """
+    Split function names into meaningful tokens.
+    """
+    if not name:
+        return []
+    name = name.replace(".", "_")
+    parts = re.split(r"[_\W]+", name)
+    tokens = []
+    for p in parts:
+        subtokens = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+", p)
+        if subtokens:
+            tokens.extend(subtokens)
+        else:
+            tokens.append(p)
+    tokens = [t.lower() for t in tokens if t]
+    return tokens
+
+def _semantic_name_bonus(target_obj, candidate_obj, min_len=4, bonus=15):
+    """
+    Bonus for meaningful shared name fragments outside a stoplist.
+    """
+    t_name = getattr(target_obj, "name", "") or ""
+    c_name = getattr(candidate_obj, "name", "") or ""
+
+    t_tokens = {tok for tok in _split_identifiers(t_name) if len(tok) >= min_len and tok not in STOP_TOKENS}
+    c_tokens = {tok for tok in _split_identifiers(c_name) if len(tok) >= min_len and tok not in STOP_TOKENS}
+
+    if not t_tokens or not c_tokens:
+        return 0
+
+    common = t_tokens & c_tokens
+    if not common:
+        return 0
+
+    return bonus
+
+def _struct_overlap_bonus(target_struct_fp, candidate_struct_fp):
+    """
+    Score shared data/struct offsets between target and candidate.
+    """
+    if not target_struct_fp or not candidate_struct_fp:
+        return 0
+
+    overlap = target_struct_fp & candidate_struct_fp
+    if not overlap:
+        return 0
+
+    # Separate specific vs. common offsets to downweight ubiquitous fields/globals.
+    COMMON_STRUCT_OFFSETS = {0x0, 0x4, 0x8, 0x10, 0x14, 0x18, 0x1C, 0x20}
+    specific = {o for o in overlap if o not in COMMON_STRUCT_OFFSETS}
+    common = overlap - specific
+
+    bonus = 0
+    if specific:
+        bonus += 25 + max(len(specific) - 1, 0) * 5
+    if common:
+        bonus += min(5, len(common))  # Barely reward trivially shared offsets.
+
+    # Approximate dependency strength: high coverage of shared fields boosts a bit.
+    union_size = len(target_struct_fp | candidate_struct_fp)
+    coverage = len(overlap) / max(union_size, 1)
+    if len(overlap) >= 2 and coverage >= 0.5:
+        bonus += 5
+
+    return bonus
+
+LEXICAL_STOP_TOKENS = {
+    "mov", "add", "sub", "mul", "div", "xor", "and", "or", "cmp", "test",
+    "jmp", "je", "jne", "jg", "jge", "jl", "jle", "ja", "jae", "jb", "jbe",
+    "push", "pop", "call", "lea", "nop", "ret",
+    "byte", "word", "dword", "qword", "ptr",
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp",
+    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+    "eax", "ebx", "ecx", "edx", "esi", "edi", "esp", "ebp",
+    "loc", "var", "tmp",
+}
+
+_REGEX_REG = re.compile(
+    r"\b(?:r[0-9]+|r1[0-5]|r[8-9]|rax|rbx|rcx|rdx|rsi|rdi|rsp|rbp|"
+    r"eax|ebx|ecx|edx|esi|edi|esp|ebp|al|ah|bl|bh|cl|ch|dl|dh)\b",
+    re.IGNORECASE,
+)
+
+def _normalize_assembly_for_lexical(assembly: str) -> str:
+    """
+    Strip register names and lower-case to dampen compiler/register variance.
+    """
+    if not assembly:
+        return ""
+    text = assembly.lower()
+    text = _REGEX_REG.sub("<reg>", text)
+    return text
+
+def _extract_lexical_fingerprint(assembly: str):
+    """
+    Extract rare-ish lexical tokens from assembly (constants, strings, notable symbols).
+    """
+    if not assembly:
+        return set()
+
+    assembly = _normalize_assembly_for_lexical(assembly)
+    fp = set()
+
+    for m in re.finditer(r"0x[0-9a-fA-F]+", assembly):
+        lit = m.group(0).lower()
+        if len(lit) >= 6:  # 0x + at least 4 hex chars
+            fp.add(lit)
+
+    for m in re.finditer(r'"([^"]+)"', assembly):
+        lit = m.group(1).strip().lower()
+        if len(lit) >= 4:
+            fp.add(lit)
+
+    for m in re.finditer(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", assembly):
+        tok = m.group(0).lower()
+        if len(tok) >= 4 and tok not in LEXICAL_STOP_TOKENS:
+            fp.add(tok)
+
+    return fp
+
+def _lexical_overlap_bonus(target_lex_fp, candidate):
+    """
+    Small tie-breaker bonus for rare lexical overlaps (constants/strings/symbols).
+    """
+    if not target_lex_fp:
+        return 0
+
+    cand_fp = candidate.get("lex_fp")
+    if cand_fp is None:
+        cand_fp = _extract_lexical_fingerprint(candidate.get("assembly", "") or "")
+        candidate["lex_fp"] = cand_fp
+
+    overlap = target_lex_fp & cand_fp
+    if not overlap:
+        return 0
+
+    return min(5, 2 + len(overlap))
+
+def _extract_api_signature(assembly: str) -> set[str]:
+    """
+    Extract called API names as a coarse semantic signature.
+    """
+    if not assembly:
+        return set()
+
+    apis = set()
+    for m in re.finditer(r"\bcall(?:q)?\s+([A-Za-z_][A-Za-z0-9_@.\-]*)", assembly):
+        name = m.group(1)
+        name = name.replace("plt.", "")
+        name = _strip_symbol_version(name)
+        name = name.split("@")[0]
+        if not name or name.startswith("__"):
+            continue
+        apis.add(name.lower())
+    return apis
+
+def _api_signature_bonus(target_api_sig, candidate, base_bonus=12, max_bonus=15):
+    """
+    Bonus for overlapping API-call signatures (fallback when names are weak/absent).
+    """
+    if not target_api_sig:
+        return 0
+
+    cand_sig = candidate.get("api_sig")
+    if cand_sig is None:
+        cand_sig = _extract_api_signature(candidate.get("assembly", "") or "")
+        candidate["api_sig"] = cand_sig
+
+    if not cand_sig:
+        return 0
+
+    overlap = target_api_sig & cand_sig
+    if not overlap:
+        return 0
+
+    return min(max_bonus, base_bonus + max(len(overlap) - 1, 0))
+
+def _callgraph_distance_bonus(degree, has_data_overlap):
+    """
+    Lightly reward 2-hop neighbors only when backed by data overlap.
+    """
+    if degree == 2 and has_data_overlap:
+        return 5
+    return 0
+
+def _is_small_leaf_wrapper(candidate_obj, cg, target_addr, max_blocks=30, max_insns=50):
+    """
+    Leaf-ish wrapper: no outgoing calls besides possibly the target, and structurally small.
+    """
+    if candidate_obj is None:
+        return False
+
+    try:
+        succ_addrs = set(cg.successors(candidate_obj.addr))
+    except Exception:
+        succ_addrs = set()
+
+    non_target_calls = {addr for addr in succ_addrs if addr != target_addr}
+    if non_target_calls:
+        return False
+
+    block_count, insn_count = _get_block_and_insn_counts(candidate_obj)
+    if block_count is None or insn_count is None:
+        return False
+
+    return block_count <= max_blocks and insn_count <= max_insns
+
+def _calculate_candidate_score(candidate, callgraph, all_program_funcs, target_addr, target_struct_fp=None, target_src_loc=None, target_lex_fp=None, target_api_sig=None):
     """
     Score a context candidate (higher = better).
     """
-    # 1) Semantic similarity (future RAG hook).
-    # similarity = calculate_embedding_similarity(candidate['name'], target_func.name, vector_db)
-    # score += similarity * 30
+    candidate["score"] = candidate.get("score", BASIC_SCORE)
 
-    # 2) Bonus for directly calling the target.
-    if _candidate_func_calls_target(candidate['function_obj'].addr, callgraph, target_addr):
-        candidate['score'] += 30
+    candidate_obj = candidate.get("function_obj")
+    candidate_addr = getattr(candidate_obj, "addr", None)
+    target_obj = all_program_funcs.get(target_addr)
 
-    # 2b) Bonus for struct fingerprint overlap.
-    if target_struct_fp and candidate.get("struct_fp"):
-        overlap = target_struct_fp & candidate["struct_fp"]
-        if overlap:
-            candidate['score'] += 15 + 2*len(overlap)
+    if candidate_addr is None:
+        return candidate["score"]
 
-    # 3) Penalize complex functions (non-junk callees).
-    num_callees = _count_non_junk_callees(candidate['function_obj'], callgraph, all_program_funcs, JUNK_FUNCTIONS)
-    candidate['score'] -= num_callees * 5
+    direct_link = (
+        _candidate_func_calls_target(candidate_addr, callgraph, target_addr)
+        or _target_calls_candidate(target_addr, callgraph, candidate_addr)
+    )
 
-    # 4) Penalize distance in the call graph.  # TODO: confirm if degree-based iteration makes this redundant.
-    candidate['score'] -= (candidate.get('degree', 0) - 1) * 10
+    if direct_link and not _is_stub_like(candidate_obj) and not _is_stub_like(target_obj):
+        candidate["score"] += 30
+
+        if _candidate_func_calls_target(candidate_addr, callgraph, target_addr):
+            if _is_small_leaf_wrapper(candidate_obj, callgraph, target_addr):
+                candidate["score"] += 20
+
+    overlap_bonus = _struct_overlap_bonus(target_struct_fp, candidate.get("struct_fp"))
+    if overlap_bonus:
+        candidate["score"] += overlap_bonus
+
+    cfg_bonus = _cfg_similarity_bonus(target_obj, candidate_obj)
+    if cfg_bonus:
+        candidate["score"] += cfg_bonus
     
-    # 5) Penalize very large functions.
-    c_token_count = candidate.get('token_count', 0)
-    candidate['score'] -= c_token_count / 100
+    semantic_bonus = _semantic_name_bonus(target_obj, candidate_obj)
+    if semantic_bonus:
+        candidate["score"] += semantic_bonus
 
-    if target_src_loc:
-        cand_src = candidate.get("src_loc")
-        if cand_src:
-            tgt_file = target_src_loc.split(":", 1)[0]
-            cand_file = cand_src.split(":", 1)[0]
-            if tgt_file == cand_file:
-                candidate["score"] += 12
+    if not semantic_bonus:
+        sig_bonus = _api_signature_bonus(target_api_sig, candidate)
+        if sig_bonus:
+            candidate["score"] += sig_bonus
+
+    lex_bonus = _lexical_overlap_bonus(target_lex_fp, candidate)
+    if lex_bonus:
+        candidate["score"] += lex_bonus
+
+    degree = candidate.get("degree", None)
+    cg_bonus = _callgraph_distance_bonus(degree, overlap_bonus > 0)
+    if cg_bonus:
+        candidate["score"] += cg_bonus
+
+    if candidate.get("is_leaf") and not direct_link and overlap_bonus == 0:
+        candidate["score"] -= 5
+
     return candidate["score"]
 
 
@@ -543,8 +887,11 @@ def token_degree_level_check(remaining_candidates):
     )
 
     return min_degree, total_tokens_current_degree
+def add_candidate_as_c_code_to_context(remaining_candidates, candidate, current_budget):
+    # TODO
+    pass
 
-def add_remaining_candidates_to_context(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_program_funcs):
+def add_remaining_candidates_to_context(remaining_candidates, current_budget, REDUCTION_LEVEL):
     """
     Fills budget with candidates from the given degree group, prioritized by score.
     Returns (new_budget: int, stop_processing: bool)
@@ -552,35 +899,26 @@ def add_remaining_candidates_to_context(degree_group, remaining_candidates, cont
     """
     # Not enough budget for the whole degree: prioritize within this degree.
     # TODO: Revisit whether we should scan per degree or across all candidates.
-    prioritized = remaining_candidates
+    prioritized_sorted = remaining_candidates
     added_any = False
         
-    # Sort the prioritized list based on score (higher is better).
-    prioritized_sorted = sorted(
-        prioritized,
-        key=lambda x: (-x.get('score', 0), x.get('token_count', float('inf')))
-    )
     for candidate in prioritized_sorted:
         if current_budget <= 0:
             break
-        if candidate in context_funcs:
+
+        if candidate['token_count'] <= current_budget:
             try:
                 remaining_candidates.remove(candidate)
             except ValueError:
-                pass
-            continue
-        if candidate['token_count'] <= current_budget:
-            current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
-            added_any = True
-        else:
-            remaining_candidates.remove(candidate)
-            continue
-
-    if not added_any:
-        any_fittable = any(c.get('token_count', 0) <= current_budget for c in remaining_candidates)
-        if not any_fittable:
-            # Signal the caller that no further progress is possible.
-            return current_budget, True
+                pass # TODO maybe break here?
+            if REDUCTION_LEVEL == 1:
+                # random value between 0 and 1
+                if random.random() < 0.6:
+                    current_budget = add_candidate_to_context(remaining_candidates, candidate, current_budget)
+                else:
+                    current_budget = add_candidate_as_c_code_to_context(remaining_candidates, candidate, current_budget)
+            elif REDUCTION_LEVEL == 0:
+                current_budget = add_candidate_to_context(remaining_candidates, candidate, current_budget)
 
     return current_budget, False
 
@@ -902,6 +1240,7 @@ def apply_heuristic(
     mode,
     dwarf_lookup=None,
     target_src_loc=None,
+    assembly_only=False,
 ):
     """
     Choses context functions based on the heuristic strategy within a token budget.
@@ -909,10 +1248,13 @@ def apply_heuristic(
     context_candidates_data = context_candidates_data or {}
     all_candidate_entries = context_candidates_data.get('all_functions', []) or []
     current_budget = budget - target_func_data['token_count']
-    if current_budget <= 0:  # TODO: handle cases where the target alone exceeds the budget.
+    
+    if current_budget <= 0:
         return []
 
     target_struct_fp = extract_struct_fingerprint(target_func_data.get("assembly",""))
+    target_lex_fp = _extract_lexical_fingerprint(target_func_data.get("assembly", ""))
+    target_api_sig = _extract_api_signature(target_func_data.get("assembly", ""))
     
     try:
         total_context_tokens = context_candidates_data.get('total_token_count', 0)
@@ -920,180 +1262,159 @@ def apply_heuristic(
             return all_candidate_entries.copy()
     except Exception as e:
         pass
-
-    if current_budget <= 0.25 * budget:
+    if assembly_only:
+        REDUCTION_LEVEL = 0
+    elif current_budget <= 0.15 * budget:
         REDUCTION_LEVEL = 2
     elif current_budget <= 0.6 * budget:
         REDUCTION_LEVEL = 1
     else:
         REDUCTION_LEVEL = 0
 
-    if REDUCTION_LEVEL == 2:
-        print("INFO: Target function nearly fills the budget; applying chunked-target strategy.")
-
-        chunk_token_budget = max(int(budget * 0.4), 1)
-        chunks = split_target_into_chunks(
-            target_func_data,
-            tokenizer=MYTOKENIZER,
-            max_chunk_tokens=chunk_token_budget,
-            max_chunks=3,
+    scored_candidates = []
+    for candidate in all_candidate_entries:
+        candidate['score'] = _calculate_candidate_score(
+            candidate,
+            callgraph,
+            all_functions_map,
+            target_addr,
+            target_struct_fp=target_struct_fp,
+            target_src_loc=target_src_loc,
+            target_lex_fp=target_lex_fp,
+            target_api_sig=target_api_sig,
         )
+        scored_candidates.append(candidate)
 
-        if not chunks:
-            print("INFO: Chunking produced no segments; returning without context.")
-            target_func_data["chunk_plan"] = []
-            target_func_data["chunk_strategy"] = {
-                "reduction_level": 2,
-                "max_chunk_tokens": chunk_token_budget,
-                "applied": False,
-            }
-            return []
+    scored_candidates = sorted(
+        scored_candidates,
+        key=lambda x: (-x.get('score', 0), x.get('token_count', float('inf')))
+    )
 
-        target_name = target_func_data.get("name") or "target_function"
-        target_obj = all_functions_map.get(target_addr)
-
-        chunk_plan = []
-        context_entries = []
-        skipped_chunks = []
-
-        for idx, chunk in enumerate(chunks, start=1):
-            try:
-                chunk_tokens = len(MYTOKENIZER(chunk, add_special_tokens=False).input_ids)
-            except Exception:
-                chunk_tokens = max(len(chunk) // 4, 1)
-
-            entry_name = f"{target_name}_part{idx}"
-
-            plan_entry = {
-                "index": idx,
-                "name": entry_name,
-                "assembly": chunk,
-                "token_count": chunk_tokens,
-            }
-            chunk_plan.append(plan_entry)
-
-            if idx > 1:
-                context_entries.append({
-                    "function_obj": target_obj,
-                    "name": entry_name,
-                    "assembly": chunk,
-                    "token_count": chunk_tokens,
-                    "degree": 0,
-                    "role": "caller",
-                    "is_leaf": True,
-                    "append_mode": "assembly",
-                    "score": 9999,
-                    "origin": "target_chunk",
-                })
-
-        main_entry = chunk_plan[0]
-        target_func_data["assembly"] = main_entry["assembly"]
-        target_func_data["token_count"] = main_entry["token_count"]
-        target_func_data["chunk_plan"] = chunk_plan
-        target_func_data["chunk_strategy"] = {
-            "reduction_level": 2,
-            "max_chunk_tokens": chunk_token_budget,
-            "applied": True,
-        }
-
-        remaining_budget = max(budget - main_entry["token_count"], 0)
-        selected_context = []
-
-        for entry in context_entries:
-            tokens = entry.get("token_count", 0)
-            if tokens <= remaining_budget:
-                selected_context.append(entry)
-                remaining_budget -= tokens
-            else:
-                skipped_chunks.append(entry.get("name"))
-
-        if skipped_chunks:
-            target_func_data["chunk_strategy"]["skipped_chunks"] = skipped_chunks
-
-        return selected_context
-    elif REDUCTION_LEVEL == 1:
-        # Target is large: attempt a hybrid context strategy.
-        print("INFO: Target function is large. Applying 'Hybrid Context' strategy.")
-
-        # Step 1: score candidates with the existing scoring system.
-        context_funcs = []
-        remaining_candidates = all_candidate_entries.copy()
-        
-        for candidate in remaining_candidates:
-            candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map, target_addr, target_struct_fp=target_struct_fp, target_src_loc=target_src_loc,)
-
-        # Step 2: estimate C token size for the top candidates and decide between assembly vs C.
-        important_candidates = sorted(
-            remaining_candidates,
-            key=lambda x: -x.get('score', 0)
-        )[:5]
-
-        for candidate in important_candidates:
-            if current_budget <= 0:
-                break
-            
-            cand_tokens = candidate.get('token_count', 0)
-            if cand_tokens > 0.5 * budget:
-                continue
-
-            if cand_tokens <= current_budget:
-                current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
-                continue
-
-            estimated_c_token_size = estimate_c_token_complexity(candidate['function_obj'])
-            # TODO: tighten C-token estimation; current heuristic is coarse.
-
-            if estimated_c_token_size <= current_budget:
-                # Prefer real source if available; skip experimental decompilation path.
-                c_approx = (
-                    get_real_c_code(
-                        candidate['function_obj'],
-                        project,
-                        purpose="context",
-                        dwarf_lookup=dwarf_lookup,
-                    )
-                    if mode == "train"
-                    else None
-                )
-                if c_approx:
-                    candidate['c_approx'] = c_approx
-                    current_budget = add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
-                continue
-            continue
-
-        if current_budget > 0 and remaining_candidates:
-            for candidate in remaining_candidates:
-                candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map, target_addr, target_struct_fp=target_struct_fp, target_src_loc=target_src_loc,)
-
-            current_budget, should_break = add_remaining_candidates_to_context(remaining_candidates, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
+    context_funcs = [] # TODO REMOVE: CURRENT DUMMY PARAMETER
+    if REDUCTION_LEVEL == 2:
+        ## only including C_CODE as context functions
+        # TODO            current budget = add_remaining_cadidates_as_c_code(....)
 
         return context_funcs
+    elif REDUCTION_LEVEL == 1:
+        # Target is midsize: attempt a hybrid context strategy.
+        print("INFO: Target function is midsize. Applying 'Hybrid Context' strategy.")
+        #TODO: refactor the add_remanining_candidates_to_context to support new logic: here hybrid!!!!!!!!!!!!! TODO
+        current_budget = add_remaining_candidates_to_context(scored_candidates, context_funcs, current_budget, callgraph, all_functions_map)
+        return context_funcs # TODO remove context_funcs as return parameter?
+
+        # # Step 1: score candidates with the existing scoring system.
+        # context_funcs = []
+        # remaining_candidates = all_candidate_entries.copy()
+        
+        # for candidate in remaining_candidates:
+        #     candidate['score'] = _calculate_candidate_score(
+        #         candidate,
+        #         callgraph,
+        #         all_functions_map,
+        #         target_addr,
+        #         target_struct_fp=target_struct_fp,
+        #         target_src_loc=target_src_loc,
+        #         target_lex_fp=target_lex_fp,
+        #         target_api_sig=target_api_sig,
+        #     )
+
+        # # Step 2: estimate C token size for the top candidates and decide between assembly vs C.
+        # important_candidates = sorted(
+        #     remaining_candidates,
+        #     key=lambda x: -x.get('score', 0)
+        # )[:5]
+
+        # for candidate in important_candidates:
+        #     if current_budget <= 0:
+        #         break
+            
+        #     cand_tokens = candidate.get('token_count', 0)
+        #     if cand_tokens > 0.5 * budget:
+        #         continue
+
+        #     if cand_tokens <= current_budget:
+        #         current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
+        #         continue
+
+        #     estimated_c_token_size = estimate_c_token_complexity(candidate['function_obj'])
+        #     # TODO: tighten C-token estimation; current heuristic is coarse.
+
+        #     if estimated_c_token_size <= current_budget:
+        #         # Prefer real source if available; skip experimental decompilation path.
+        #         c_approx = (
+        #             get_real_c_code(
+        #                 candidate['function_obj'],
+        #                 project,
+        #                 purpose="context",
+        #                 dwarf_lookup=dwarf_lookup,
+        #             )
+        #             if mode == "train"
+        #             else None
+        #         )
+        #         if c_approx:
+        #             candidate['c_approx'] = c_approx
+        #             current_budget = add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
+        #         continue
+        #     continue
+
+        # if current_budget > 0 and remaining_candidates:
+        #     for candidate in remaining_candidates:
+        #         candidate['score'] = _calculate_candidate_score(
+        #             candidate,
+        #             callgraph,
+        #             all_functions_map,
+        #             target_addr,
+        #             target_struct_fp=target_struct_fp,
+        #             target_src_loc=target_src_loc,
+        #             target_lex_fp=target_lex_fp,
+        #             target_api_sig=target_api_sig,
+        #         )
+
+        #     current_budget, should_break = add_remaining_candidates_to_context(remaining_candidates, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
+
+        # return context_funcs
 
     elif REDUCTION_LEVEL == 0:
-        context_funcs = []
-        remaining_candidates = all_candidate_entries.copy()
 
-        # Prioritize by iteratively adding candidates from the lowest-degree group one-by-one until the budget is exhausted, then repeat for the next-lowest degree group.
-        while remaining_candidates and current_budget > 0:
-            current_degree, total_tokens_current_degree = token_degree_level_check(remaining_candidates)
-            if current_degree is None:
-                break
+        #TODO: refactor the add_remanining_candidates_to_context to support new logic
+        current_budget = add_remaining_candidates_to_context(scored_candidates, context_funcs, current_budget, callgraph, all_functions_map)
+        # TODO: remove should_break logic
+        if assembly_only:
+            return context_funcs # TODO remove context_funcs as return parameter?
+        elif assembly_only is False:
+            # TODO            current budget = add_remaining_cadidates_as_c_code(....)
+            return context_funcs # TODO remove context_funcs as return parameter?
+
+
+        # # Prioritize by iteratively adding candidates from the lowest-degree group one-by-one until the budget is exhausted, then repeat for the next-lowest degree group.
+        # while remaining_candidates and current_budget > 0:
+        #     current_degree, total_tokens_current_degree = token_degree_level_check(remaining_candidates)
+        #     if current_degree is None:
+        #         break
             
-            # TODO: Decide whether to always iterate lower-degree groups first.
-            degree_group = [c for c in remaining_candidates if c.get('degree') == current_degree]
-            if not degree_group:
-                remaining_candidates = [c for c in remaining_candidates if c.get('degree') != current_degree]
-                continue
+        #     # TODO: Decide whether to always iterate lower-degree groups first.
+        #     degree_group = [c for c in remaining_candidates if c.get('degree') == current_degree]
+        #     if not degree_group:
+        #         remaining_candidates = [c for c in remaining_candidates if c.get('degree') != current_degree]
+        #         continue
 
-            # if current_budget >= total_tokens_current_degree:
-            #     process_degree_group(degree_group, context_funcs, remaining_candidates, current_budget)
+        #     # if current_budget >= total_tokens_current_degree:
+        #     #     process_degree_group(degree_group, context_funcs, remaining_candidates, current_budget)
 
-            # Prioritize candidates from this degree group; stop if nothing fits.
-            for candidate in remaining_candidates:
-                candidate['score'] = _calculate_candidate_score(candidate, callgraph, all_functions_map, target_addr, target_struct_fp=target_struct_fp, target_src_loc=target_src_loc,)
-            current_budget, should_break = add_remaining_candidates_to_context(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
+        #     # Prioritize candidates from this degree group; stop if nothing fits.
+        #     for candidate in remaining_candidates:
+        #         candidate['score'] = _calculate_candidate_score(
+        #             candidate,
+        #             callgraph,
+        #             all_functions_map,
+        #             target_addr,
+        #             target_struct_fp=target_struct_fp,
+        #             target_src_loc=target_src_loc,
+        #             target_lex_fp=target_lex_fp,
+        #             target_api_sig=target_api_sig,
+        #         )
+        #     current_budget, should_break = add_remaining_candidates_to_context(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
 
-            if should_break:
-                break
-
-        return context_funcs
+        #     if should_break:
+        #         break
