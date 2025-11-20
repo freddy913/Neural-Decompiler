@@ -7,6 +7,7 @@ import random
 from ElfFeatures import get_function_data, get_token_count
 from Config import BASIC_SCORE, DEGREE, JUNK_FUNCTIONS, MYTOKENIZER, RUNTIME_ENTRY_FUNCTIONS
 from HintsAndLabels import pick_best_match
+from t5_decompiler import decompile_asm_string
 
 '''
 SECTION: Candidate Selection Heuristic
@@ -859,6 +860,43 @@ def _calculate_candidate_score(candidate, callgraph, all_program_funcs, target_a
 
     return candidate["score"]
 
+def add_candidate_as_c_code_to_context(remaining_candidates, context_funcs, candidate, current_budget, mode):
+    added = False
+
+    def _only_add_real_c_code():
+        candidate['append_mode'] = 'c_code'
+        context_funcs.append(candidate)
+        try:
+            remaining_candidates.remove(candidate)
+        except ValueError:
+            pass
+        current_budget -= candidate['c_token_count']
+        added = True
+    
+    def _decompile_and_add():
+        temp_result_decomp = decompile_context_function_to_c(candidate['function_obj'], candidate.get('project'), candidate.get('model'))
+        if temp_result_decomp is None:
+            if mode == "test":
+                return current_budget,remaining_candidates, added
+            elif mode == "train":
+                _only_add_real_c_code()
+        else:
+            candidate['c_code'] = temp_result_decomp
+                
+        candidate['c_token_count'] = get_token_count(candidate['c_code'])
+        if candidate['c_token_count'] <= current_budget:
+            _only_add_real_c_code()
+
+    if mode == "test":
+        _decompile_and_add()
+        
+    elif mode == "train":
+        if random.random() < 0.6:
+            _decompile_and_add()
+        else:
+            _only_add_real_c_code()
+
+    return current_budget, remaining_candidates, added
 
 def add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget):
     token_count = candidate.get('token_count', 0)
@@ -887,11 +925,26 @@ def token_degree_level_check(remaining_candidates):
     )
 
     return min_degree, total_tokens_current_degree
-def add_candidate_as_c_code_to_context(remaining_candidates, candidate, current_budget):
-    # TODO
-    pass
+def add_remaining_candidates_as_c_code_to_context(remaining_candidates, context_funcs, current_budget, mode):
+    prioritized_sorted = remaining_candidates
 
-def add_remaining_candidates_to_context(remaining_candidates, current_budget, REDUCTION_LEVEL):
+    for candidate in prioritized_sorted:
+        if current_budget <= 0:
+            break
+        candidate['c_code'] = get_real_c_code(candidate) # TODO overwrite, im not sure if its really the real c code
+        candidate['c_token_count'] = get_token_count(candidate['c_code'])
+        if candidate['c_token_count'] <= current_budget:
+            try:
+                remaining_candidates.remove(candidate)
+            except ValueError:
+                pass # TODO maybe break here?
+                current_budget, remaining_candidates, added = add_candidate_as_c_code_to_context(remaining_candidates, context_funcs, candidate, current_budget, mode)
+            if not added:
+                remaining_candidates.append(candidate)
+                # maybe unnessary
+    return current_budget, remaining_candidates
+
+def add_remaining_candidates_to_context(remaining_candidates, context_funcs, current_budget, REDUCTION_LEVEL):
     """
     Fills budget with candidates from the given degree group, prioritized by score.
     Returns (new_budget: int, stop_processing: bool)
@@ -900,7 +953,6 @@ def add_remaining_candidates_to_context(remaining_candidates, current_budget, RE
     # Not enough budget for the whole degree: prioritize within this degree.
     # TODO: Revisit whether we should scan per degree or across all candidates.
     prioritized_sorted = remaining_candidates
-    added_any = False
         
     for candidate in prioritized_sorted:
         if current_budget <= 0:
@@ -914,13 +966,13 @@ def add_remaining_candidates_to_context(remaining_candidates, current_budget, RE
             if REDUCTION_LEVEL == 1:
                 # random value between 0 and 1
                 if random.random() < 0.6:
-                    current_budget = add_candidate_to_context(remaining_candidates, candidate, current_budget)
+                    current_budget, remaining_candidates = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
                 else:
-                    current_budget = add_candidate_as_c_code_to_context(remaining_candidates, candidate, current_budget)
+                    current_budget = add_candidate_as_c_code_to_context(remaining_candidates, context_funcs, candidate, current_budget)
             elif REDUCTION_LEVEL == 0:
-                current_budget = add_candidate_to_context(remaining_candidates, candidate, current_budget)
+                current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
 
-    return current_budget, False
+    return current_budget, remaining_candidates
 
 def estimate_c_token_complexity(func):
     """
@@ -1206,12 +1258,21 @@ def get_real_c_code(
 
     return None
 
-def decompile_context_function_to_c(func_obj, project, model): 
+def decompile_context_function_to_c(func_obj, candidate, project, model): 
     """
     Decompiles the given function object to C code using the project's decompiler.
     """
-    
-    pass
+    # TODO : so # c_approx = decompile_asm_string(candidate)
+    try:
+        result = subprocess.run(["python3", "inference.py"], capture_output=True, text=True, check=True)
+        output = result.stdout
+        if "===== OUTPUT =====" in output:
+                return output.split("===== OUTPUT =====", 1)[1].strip()
+        else:
+            return None
+    except subprocess.CalledProcessError as e:
+        return f"Error running inference.py: {e.stderr}"
+        
 
 def add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget): 
     """
@@ -1300,7 +1361,8 @@ def apply_heuristic(
         # Target is midsize: attempt a hybrid context strategy.
         print("INFO: Target function is midsize. Applying 'Hybrid Context' strategy.")
         #TODO: refactor the add_remanining_candidates_to_context to support new logic: here hybrid!!!!!!!!!!!!! TODO
-        current_budget = add_remaining_candidates_to_context(scored_candidates, context_funcs, current_budget, callgraph, all_functions_map)
+        current_budget, scored_candidates = add_remaining_candidates_to_context(scored_candidates, context_funcs, current_budget, REDUCTION_LEVEL)
+        current_budget, scored_candidates = add_remaining_candidates_as_c_code_to_context(scored_candidates, context_funcs, current_budget, mode)
         return context_funcs # TODO remove context_funcs as return parameter?
 
         # # Step 1: score candidates with the existing scoring system.
@@ -1378,7 +1440,7 @@ def apply_heuristic(
     elif REDUCTION_LEVEL == 0:
 
         #TODO: refactor the add_remanining_candidates_to_context to support new logic
-        current_budget = add_remaining_candidates_to_context(scored_candidates, context_funcs, current_budget, callgraph, all_functions_map)
+        current_budget = add_remaining_candidates_to_context(scored_candidates, context_funcs, current_budget, REDUCTION_LEVEL)
         # TODO: remove should_break logic
         if assembly_only:
             return context_funcs # TODO remove context_funcs as return parameter?

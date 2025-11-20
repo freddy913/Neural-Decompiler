@@ -181,7 +181,7 @@ def main():
                 "--binary-path", binary_path,
                 "--function-name", func,
                 "--source-path", source_path,
-                "--UseContext", "false",
+                "--UseContext", "true",
             ]
             print(f"[RUN] {' '.join(shlex.quote(part) for part in cmd)}")
             try:

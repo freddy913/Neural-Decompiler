@@ -13,6 +13,7 @@ from Config import (
     WRITE_DEBUG_FILES,
     FUNCTION_TXT,
     ASSEMBLY_TXT,
+    USE_ASSEMBLY_ONLY,
 )
 
 from Heuristic import (
@@ -341,7 +342,7 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
     """
     mode:
     'train' - build sample for training
-    'infer' - build sample for inference
+    'test' - build test sample for inference
     """
     if not os.path.isfile(TARGET_BINARY_PATH):
         print(f"[ERR] Binary '{TARGET_BINARY_PATH}' not found. Build/compile the target before running build_sample.")
@@ -391,12 +392,12 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
         )
 
         print("\n--- Context Analysis (Generation 1) ---")
-        print(f"Found {len(context_candidates['callers'])} unique calling function(s):")
-        for caller in sorted(list(context_candidates['callers']), key=lambda f: f.name):
+        print(f"Found {len(context_funcs['callers'])} unique calling function(s):")
+        for caller in sorted(list(context_funcs['callers']), key=lambda f: f.name):
             print(f"  - '{caller.name}'")
             
-        print(f"\nFound {len(context_candidates['callees'])} unique called function(s):")
-        for callee in sorted(list(context_candidates['callees']), key=lambda f: f.name):
+        print(f"\nFound {len(context_funcs['callees'])} unique called function(s):")
+        for callee in sorted(list(context_funcs['callees']), key=lambda f: f.name):
             print(f"  - '{callee.name}'")
 
         seen_addresses = set()
@@ -428,6 +429,7 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
             mode,
             dwarf_lookup=dwarf_ref,
             target_src_loc=target_src_loc,
+            assembly_only=USE_ASSEMBLY_ONLY,
         ) or []
 
     ## TODO: REMOVE CHUNKPLAN BECAUSE WE DONT CHUNK 
@@ -487,12 +489,12 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
         sample["label_c_code"] = formatted_output
         sample["context_role"] = "train"
 
-    elif mode == "infer":
-        sample["context_role"] = "inference"
+    elif mode == "test":
+        sample["context_role"] = "test"
 
     else:
         print(f"[WARN] Unknown mode '{mode}', defaulting to inference semantics.")
-        sample["context_role"] = "inference"
+        sample["context_role"] = "test"
 
     return sample
 
@@ -526,9 +528,9 @@ def main():
     parser = argparse.ArgumentParser(description="Run decompiler pipeline")
     parser.add_argument(
         "--mode",
-        choices=["train", "infer"],
+        choices=["train", "test"],
         default="train",
-        help="Mode: train for dataset generation, infer for analysis",
+        help="Mode: train for dataset generation, test for analysis",
     )
     parser.add_argument(
         "--binary-path",
@@ -709,7 +711,7 @@ def main():
         print(f"Input tokens preview:\n{result['model_input']}")
         print(f"\nLabel preview:\n{label}")
     else:
-        print("\n--- Inference Mode Output ---")
+        print("\n--- Test Mode Output ---")
         print(f"ContextRole: {result['context_role']}")
         print(f"Target function: {result['target_function_name']}")
         print(f"Model input:\n{result['model_input']}")
