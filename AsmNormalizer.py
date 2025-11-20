@@ -6,6 +6,7 @@ import os
 import re
 import weakref
 from bisect import bisect_left
+import re as _re_end
 
 from ElfFeatures import _function_symbol_addrs
 
@@ -36,6 +37,10 @@ _REG_CANONICAL = {
     "r9d": "r9",
 }
 _STDIO_FDS = {"0", "0x0", "1", "0x1", "2", "0x2"}
+
+_SECTION_SPLIT_RE = re.compile(r'\s+(TARGET:|BY|TO|Caller:|Callee:)', re.IGNORECASE)
+
+_RET_RE = _re_end.compile(r'^\s*ret\s*;?\s*$', re.IGNORECASE)
 
 def _store_call_symbol_map(project, mapping: dict[int, str]) -> None:
     try:
@@ -123,12 +128,11 @@ def _build_call_symbol_map(project) -> dict[int, str]:
         except Exception:
             pass
 
-    # Augment with import map that already normalizes names and enforces @plt suffix.
+    # already normalized imports from ElfFeatures
     mapping.update(_function_symbol_addrs(project))
     return mapping
 
 def _tighten_commas_semicolons(s: str) -> str:
-    # Remove spaces around ',' and ';'.
     s = re.sub(r'\s*,\s*', ',', s)
     s = re.sub(r'\s*;\s*', ';', s)
     return s
@@ -138,7 +142,6 @@ def _strip_addr_prefix(s: str) -> str:
     return re.sub(r'^\s*0x[0-9a-fA-F]+:\s*', '', s).strip()
 
 def join_semicolon(seq: list[str]) -> str:
-    """Joins with ';'."""
     seq = [x for x in (s.strip() for s in seq) if x]
     if not seq:
         return ""
@@ -146,7 +149,6 @@ def join_semicolon(seq: list[str]) -> str:
     return re.sub(r'\s+', ' ', joined).strip()
 
 def _drop_block_lines(s: str) -> bool:
-    # Filter out markers such as "Block @ 0x...".
     if "Block @" in s:
         return True
     if re.match(r'^\s*;;;?\s*Block\s*@', s, re.IGNORECASE):
@@ -154,22 +156,17 @@ def _drop_block_lines(s: str) -> bool:
     return False
 
 def _tokenize_model_input(raw_text: str) -> list[str]:
-    """Vor-Tokenisierung: weich umbrechen vor Markern/Labels, dann trimmen."""
     if not raw_text:
         return []
     tokenized = re.sub(
         r'(?=(HEADERS:|#include|Target:|Caller:|Callee:|BY\b|TO\b|;;;?\s*Block\s*@|^\s*0x[0-9a-fA-F]+:))',
         '\n',
         raw_text,
-        flags=re.MULTILINE
+        flags=re.MULTILINE | re.IGNORECASE
     )
     return [ln.strip() for ln in tokenized.splitlines() if ln.strip()]
 
 def _resolve_call_symbol(project, abs_or_text: str) -> str | None:
-    """
-    Best effort:  'call 0x4010b0' -> 'printf@plt' / 'puts@plt' / 'foo'
-    - abs_or_text: der Treffertext (z. B. 'call 0x4010b0' oder '0x4010b0')
-    """
     try:
         m = re.search(r'0x[0-9a-fA-F]+', abs_or_text)
         if not m:
@@ -218,7 +215,6 @@ def _resolve_call_symbol(project, abs_or_text: str) -> str | None:
     return None
 
 def _rewrite_calls(line: str, project) -> str:
-    # Rewrite 'call 0x...' into a resolved symbol when possible, fallback to <FUNC>.
     def _sub(mm):
         sym = _resolve_call_symbol(project, mm.group(0))
         return f"call {sym}" if sym else "call <FUNC>"
@@ -227,7 +223,7 @@ def _rewrite_calls(line: str, project) -> str:
 # Simple symbol extraction from "call printf@plt".
 _CALL_SYM_RE = re.compile(r'\bcall\s+([_a-zA-Z0-9@._]+)\b')
 
-# Matches STRx..., FMTx..., CMDx..., DATx... placeholders.
+# Matches STRx..., FMTx..., CMDx..., DATx...
 _PLACEHOLDER_RE = re.compile(r'\b(?:STR|FMT|CMD|DAT)x[0-9a-fA-F]+\b')
 _RIP_REL_OPERAND_RE = re.compile(r'\[rip\s*(?P<sign>[+-])\s*0x(?P<hex>[0-9a-fA-F]+)\]', re.IGNORECASE)
 _PTR_TO_PLACEHOLDER_RE = re.compile(
@@ -279,8 +275,6 @@ def _as_placeholder(tok: str) -> str | None:
     return m.group(0) if m else None
 
 def _looks_stderr_stdout(s: str) -> str | None:
-    # Symbols often appear in objdump comments, e.g.
-    # "lea rdi, [rip + 0x... ]   # ... <_IO_2_1_stderr_+0x..>"
     low = s.lower()
     if "stderr" in low:
         return STREAM_STDERR
@@ -289,14 +283,9 @@ def _looks_stderr_stdout(s: str) -> str | None:
     return None
 
 def _track_simple_reg_moves(line: str, reg_state: dict[str,str]) -> None:
-    """
-    Sehr simple Register-Tracker: merkt sich Werte in rdi/rsi/rdx/rcx/r8/r9,
-    wenn sie klar als Platzhalter (STRx..., FMTx..., CMDx..., DATx...)
-    oder als STREAM_* erkennbar sind.
-    """
     m = _REG_CAPTURE_RE.search(line)
     if not m:
-        # handle simple zeroing like "xor edi, edi"
+        # xor rdi, rdi → 0
         x = re.search(r'\bxor\s+((?:r|e)(?:di|si|dx|cx)|r8d?|r9d?)\s*,\s*\1\b', line, re.IGNORECASE)
         if x:
             reg = _REG_CANONICAL.get(x.group(1).lower(), x.group(1).lower())
@@ -309,7 +298,7 @@ def _track_simple_reg_moves(line: str, reg_state: dict[str,str]) -> None:
 
     rhs_lower = rhs.lower()
 
-    # Propagate value from other tracked register
+    # copy from other tracked reg
     reg_copy = re.fullmatch(r'(?:r|e)(?:di|si|dx|cx)|r8d?|r9d?', rhs_lower)
     if reg_copy:
         src = _REG_CANONICAL.get(rhs_lower, rhs_lower)
@@ -318,13 +307,13 @@ def _track_simple_reg_moves(line: str, reg_state: dict[str,str]) -> None:
             reg_state[reg] = val
         return
 
-    # Direct placeholder?
+    # placeholder
     ph = _as_placeholder(rhs)
     if ph:
         reg_state[reg] = ph
         return
 
-    # Placeholder derived from a comment?
+    # stderr/stdout from comment
     st = _looks_stderr_stdout(line)
     if st:
         reg_state[reg] = st
@@ -335,25 +324,24 @@ def _track_simple_reg_moves(line: str, reg_state: dict[str,str]) -> None:
         reg_state[reg] = st_rhs
         return
 
-    # If [rip+0x..] did not resolve to a placeholder leave it for the ofs-mapping step.
-    # Optionally propagate explicit STREAM_* markers injected earlier.
+    # explicit STREAM_* text
     if "STREAM_STDERR" in rhs or "STREAM_STDOUT" in rhs:
         reg_state[reg] = STREAM_STDERR if "STDERR" in rhs else STREAM_STDOUT
         return
 
-    # immediate literal
+    # immediate
     if re.fullmatch(r'(?:0x[0-9a-fA-F]+|\d+)', rhs_lower):
         reg_state[reg] = rhs_lower
         return
-    
+
 _LIBC_PRINTF_FAMILY = {
     "printf": ("printf", 1),
     "puts": ("puts", 1),
     "putchar": ("putchar", 1),
-    "fprintf": ("fprintf", 2),  # (stream, fmt/str)
-    "dprintf": ("dprintf", 2),  # (fd, fmt/str)
-    "sprintf": ("sprintf", 2),  # (buf, fmt/str)
-    "snprintf": ("snprintf", 3),  # (buf, n, fmt/str)
+    "fprintf": ("fprintf", 2),
+    "dprintf": ("dprintf", 2),
+    "sprintf": ("sprintf", 2),
+    "snprintf": ("snprintf", 3),
 }
 _LIBC_ALIAS_MAP_RAW = {
     "__printf_chk": "printf",
@@ -394,20 +382,16 @@ def _normalize_symbol_generic(sym: str | None) -> str:
     base = base.strip()
     if not base:
         return ""
-    key = base.lower()
-    return _LIBC_ALIAS_MAP.get(key, key)
+    lower = base.lower()
+    if lower in _LIBC_ALIAS_MAP:
+        return _LIBC_ALIAS_MAP[lower]
+    # eigene Symbole nicht zwangs-lowern
+    return base
 
 def _normalize_libc_printf_symbol(sym: str | None) -> str:
     return _normalize_symbol_generic(sym)
 
 def _fuse_libc_calls(seq_lines: list[str]) -> list[str]:
-    """
-    Sucht kurze Muster:
-      - „…; (mov|lea) rdi, STRx… ; … ; call printf@plt“  →  „printf(STRx…)“
-      - „…; (mov|lea) rsi, STRx… ; … ; call fprintf@plt“ →  „fprintf(STREAM_*,STRx…)“ (wenn Stream heuristisch erkannt)
-      - puts: erster Arg in rdi
-    Nutzt nur sehr einfache Nähe-Heuristik (Fenster 3–4 Instruktionen).
-    """
     out = []
     i = 0
     n = len(seq_lines)
@@ -423,50 +407,23 @@ def _fuse_libc_calls(seq_lines: list[str]) -> list[str]:
         callee = _normalize_libc_printf_symbol(raw_callee)
         fam = _LIBC_PRINTF_FAMILY.get(callee)
 
-        # Track arguments backwards inside a small window (System V: rdi, rsi, rdx, rcx, r8, r9).
         reg_state: dict[str,str] = {}
         win_start = max(0, i - _FUSE_LOOKBACK)
         for j in range(win_start, i):
             _track_simple_reg_moves(seq_lines[j], reg_state)
 
-        def _placeholder_from(*regs: str) -> str | None:
-            for reg in regs:
-                val = reg_state.get(reg)
-                if val and _PLACEHOLDER_RE.match(val):
-                    return val
-            return None
-
-        def _stream_from_regs(*regs: str, fallback: bool = True) -> str | None:
-            for reg in regs:
-                val = reg_state.get(reg)
-                if val in _STREAM_TOKENS:
-                    return val
-            # try comments in preparation lines
-            for j in range(max(0, i - _FUSE_LOOKBACK), i):
-                st = _looks_stderr_stdout(seq_lines[j])
-                if st:
-                    return st
-            st_current = _looks_stderr_stdout(line)
-            if st_current:
-                return st_current
-            return STREAM_UNKNOWN if fallback else None
-
-        def _fd_from_regs(*regs: str) -> str | None:
-            for reg in regs:
-                val = reg_state.get(reg)
-                if val and val not in _STREAM_TOKENS and not _PLACEHOLDER_RE.match(val):
-                    return val
-            return None
-
-        def _is_numeric(val: str | None) -> bool:
-            return bool(val and re.fullmatch(r'(?:0x[0-9a-fA-F]+|\d+)', val.strip()))
-
-        def _norm_int(val: str | None) -> str | None:
+        def _canon_arg(val: str | None) -> str | None:
             if not val:
                 return None
-            return val.strip().lower()
+            v = val.strip()
+            if _PLACEHOLDER_RE.match(v):
+                return v
+            if v in _STREAM_TOKENS:
+                return v
+            if re.fullmatch(r'(?:0x[0-9a-fA-F]+|\d+)', v):
+                return v
+            return None
 
-        # Helper to read the tracked value for a given register.
         def _arg(reg: str):
             return reg_state.get(reg)
 
@@ -477,110 +434,112 @@ def _fuse_libc_calls(seq_lines: list[str]) -> list[str]:
         else:
             fname = callee
 
+        # ----- printf -----
         if fname == "printf":
-            a_rdi = _arg("rdi")
-            a_rsi = _arg("rsi")
-            ph_rdi = a_rdi if a_rdi and _PLACEHOLDER_RE.match(a_rdi) else None
-            ph_rsi = a_rsi if a_rsi and _PLACEHOLDER_RE.match(a_rsi) else None
-            if a_rdi in _STDIO_FDS and ph_rsi:
-                fused = f"dprintf({a_rdi},{ph_rsi})"
+            fmt = _arg("rdi") or _arg("rsi")
+
+            # nur fusen, wenn es wirklich einer unserer Platzhalter ist
+            if fmt and _PLACEHOLDER_RE.match(fmt):
+                # evtl. weitere register-args einsammeln
+                arg_candidates = [_arg("rsi"), _arg("rdx"), _arg("rcx"), _arg("r8"), _arg("r9")]
+                extra = [a for a in arg_candidates if a and not _PLACEHOLDER_RE.match(a)]
+                if extra:
+                    fused = "printf(" + ",".join([fmt] + extra) + ")"
+                else:
+                    fused = f"printf({fmt})"
             else:
-                ph = ph_rdi or ph_rsi
-                if ph:
-                    fused = f"printf({ph})"
+                # kein Platzhalter → gar nicht fusen
+                fused = None
+
+        # ----- fprintf -----
+        elif fname == "fprintf":
+            stream = _arg("rdi")
+            fmt = _arg("rsi")
+            if fmt and _PLACEHOLDER_RE.match(fmt):
+                extra = []
+                for r in ("rdx", "rcx", "r8", "r9"):
+                    v = _arg(r)
+                    cv = _canon_arg(v)
+                    if cv:
+                        extra.append(cv)
+                if stream == STREAM_STDOUT:
+                    if extra:
+                        fused = f"printf({fmt}," + ",".join(extra) + ")"
+                    else:
+                        fused = f"printf({fmt})"
+                elif stream == STREAM_STDERR:
+                    if extra:
+                        fused = f"fprintf(STREAM_STDERR,{fmt}," + ",".join(extra) + ")"
+                    else:
+                        fused = f"fprintf(STREAM_STDERR,{fmt})"
+                else:
+                    if extra:
+                        fused = f"fprintf({stream or 'STREAM_UNKNOWN'},{fmt}," + ",".join(extra) + ")"
+                    else:
+                        fused = f"fprintf({stream or 'STREAM_UNKNOWN'},{fmt})"
+
+        # ----- dprintf -----
+        elif fname == "dprintf":
+            fd = _arg("rdi")
+            fmt = _arg("rsi") or _arg("rdx") or _arg("rcx")
+            if fmt and _PLACEHOLDER_RE.match(fmt):
+                extra = []
+                for r in ("rdx", "rcx", "r8", "r9"):
+                    v = _arg(r)
+                    cv = _canon_arg(v)
+                    if cv:
+                        extra.append(cv)
+                if fd in _STDIO_FDS:
+                    if extra:
+                        fused = f"printf({fmt}," + ",".join(extra) + ")"
+                    else:
+                        fused = f"printf({fmt})"
+                else:
+                    if extra:
+                        fused = f"dprintf({fmt}," + ",".join(extra) + ")"
+                    else:
+                        fused = f"dprintf({fmt})"
 
         elif fname == "puts":
-            a1 = _arg("rdi") or _arg("rsi")
-            ph = a1 if a1 and _PLACEHOLDER_RE.match(a1) else None
-            if ph:
-                fused = f"fprintf({STREAM_STDOUT},{ph})"
+            ph = _arg("rdi") or _arg("rsi")
+            if ph and _PLACEHOLDER_RE.match(ph):
+                fused = f"printf({ph})"
 
         elif fname == "putchar":
             a1 = _arg("rdi") or _arg("rsi")
             if a1:
                 fused = f"putchar({a1})"
 
-        elif fname == "fprintf":
-            stream = _arg("rdi")
-            fmt    = _arg("rsi")
-            if not stream:
-                # Try to infer stream from the call-site comment (stderr/stdout).
-                stream = _stream_from_regs("rdi")
-            if fmt and _PLACEHOLDER_RE.match(fmt):
-                if stream in _STREAM_TOKENS:
-                    fused = f"fprintf({stream},{fmt})"
-                else:
-                    fused = f"fprintf({STREAM_UNKNOWN},{fmt})"
-
-        elif fname in ("sprintf","snprintf","dprintf"):
-            # Focus on the format/string argument.
-            # sprintf(buf, fmt) / snprintf(buf,n,fmt) / dprintf(fd,fmt)
-            # -> look for the last string placeholder in rsi/rdx/rcx.
-            candidates = [_arg("rsi"), _arg("rdx"), _arg("rcx")]
-            ph = next((x for x in candidates if x and _PLACEHOLDER_RE.match(x)), None)
-            if ph:
-                fused = f"{fname}({ph})"
-
-        elif fname == "fwrite":
-            data = _placeholder_from("rdi", "rsi")
-            stream = _stream_from_regs("rcx")
-            size_val = _norm_int(reg_state.get("rsi"))
-            nmemb_val = _norm_int(reg_state.get("rdx"))
-            if data and stream:
-                if size_val in ("1", "0x1") and _is_numeric(nmemb_val):
-                    fused = f"fprintf({stream},{data})"
-                else:
-                    args = [data]
-                    if size_val:
-                        args.append(size_val)
-                    if nmemb_val:
-                        args.append(nmemb_val)
-                    args.append(stream or STREAM_UNKNOWN)
-                    fused = f"fwrite({','.join(args)})"
-
-        elif fname == "fputs":
-            data = _placeholder_from("rdi", "rsi")
-            stream = _stream_from_regs("rsi", fallback=False)
-            if data and stream:
-                fused = f"fprintf({stream},{data})"
-            elif data:
-                fused = f"fputs({data})"
-
         elif fname == "perror":
-            data = _placeholder_from("rdi")
-            if data:
+            data = _arg("rdi")
+            if data and _PLACEHOLDER_RE.match(data):
                 fused = f"perror({data})"
             else:
                 fused = "perror(NULL)"
-
-        elif fname == "system":
-            cmd = _placeholder_from("rdi")
-            if cmd:
-                fused = f"system({cmd})"
 
         elif fname == "exit":
             code = _arg("rdi")
             if code and re.fullmatch(r'(?:0x[0-9a-fA-F]+|\d+)', code):
                 fused = f"exit({code})"
-            elif code == "0":
-                fused = "exit(0)"
             else:
                 fused = "exit()"
 
         elif fname == "write":
-            buf = _placeholder_from("rsi", "rdx")
-            fd = _fd_from_regs("rdi")
-            if buf and fd:
-                fused = f"write({fd},{buf})"
+            buf = _arg("rsi") or _arg("rdx")
+            fd = _arg("rdi")
+            cbuf = _canon_arg(buf)
+            if cbuf and fd and fd not in _STREAM_TOKENS:
+                fused = f"write({fd},{cbuf})"
 
         elif fname == "send":
-            buf = _placeholder_from("rsi", "rdx")
-            sock = _fd_from_regs("rdi")
-            if buf and sock:
-                fused = f"send({sock},{buf})"
+            buf = _arg("rsi") or _arg("rdx")
+            sock = _arg("rdi")
+            cbuf = _canon_arg(buf)
+            if cbuf and sock:
+                fused = f"send({sock},{cbuf})"
 
         elif fname == "recv":
-            sock = _fd_from_regs("rdi")
+            sock = _arg("rdi")
             if sock:
                 fused = f"recv({sock})"
 
@@ -588,31 +547,16 @@ def _fuse_libc_calls(seq_lines: list[str]) -> list[str]:
             _dbg(f"libc-fuse: raw={raw_callee} norm={fname} regs={reg_state} -> {fused}")
 
         if fused:
-            k = 0
-            while out and k < 4:
-                last = out[-1]
-                if '@jmp' in last.lower():
-                    break
-                if re.match(r'^(?:mov|lea|xor)\b', last, re.IGNORECASE):
-                    out.pop()
-                    k += 1
-                else:
-                    break
             out.append(fused)
             i += 1
             continue
 
-        # Fusing failed; keep the original line.
         out.append(line)
         i += 1
 
     return out
 
 def _replace_rip_rel_with_pool(line: str, const_pool: dict) -> str:
-    """
-    [rip+0xDEAD] -> STRx..., FMTx..., CMDx..., DATx... falls im Constant-Pool vorhanden,
-    sonst lassen wir den Operand stehen (wird ggf. in ofsK umgewandelt).
-    """
     if not const_pool:
         return line
 
@@ -628,21 +572,15 @@ def _replace_rip_rel_with_pool(line: str, const_pool: dict) -> str:
         if sign == '-':
             disp_val = -disp_val
 
-        source = None
         placeholder = disp_map.get(disp_val)
         if not placeholder:
             placeholder = tail_map.get(disp_hex.lower())
-            if placeholder:
-                source = "tail"
-        else:
-            source = "disp"
 
         if placeholder:
             if _LABEL_DEBUG:
-                _dbg(f"rip-replace: {match.group(0)} -> {placeholder} via {source or 'unknown'} (disp={disp_val:+#x})")
+                _dbg(f"rip-replace: {match.group(0)} -> {placeholder} (disp={disp_val:+#x})")
             return placeholder
 
-        # No placeholder found; trim whitespace for readability.
         return match.group(0).replace(" ", "")
 
     new_line = _RIP_REL_OPERAND_RE.sub(_sub, line)
@@ -651,11 +589,6 @@ def _replace_rip_rel_with_pool(line: str, const_pool: dict) -> str:
     return new_line
 
 def _ofs_map_for_function(lines: list[str]) -> dict[str, str]:
-    """
-    Baue pro Funktion konsistente ofs-IDs:
-    - Stack/Frame/sonstige Displacements sammeln und canonicalisieren.
-    - fs:0x28 NICHT ofsen (Canary).
-    """
     key_to_id = {}
     next_id = 0
 
@@ -666,46 +599,36 @@ def _ofs_map_for_function(lines: list[str]) -> dict[str, str]:
             next_id += 1
         return key_to_id[key]
 
-    # Collect displacement candidates.
     for s in lines:
-        # Leave fs:0x28 untouched.
         if "fs:" in s:
             continue
-        # Match [rsp+0x..], [rbp-0x..], [r??+imm], [addr], etc.
         for m in re.finditer(r'\[(?:[^\]]*?)\]', s):
             key = m.group(0)
-            if "rip" in key:   # RIP was handled via the constant pool.
+            if "rip" in key:
                 continue
             _assign(key)
 
-        # Rare bare immediates used in memory operands also become keys.
         for m in re.finditer(r'\b0x[0-9a-fA-F]+\b', s):
-            # Avoid picking up the fs canary again.
             if "fs:" in s:
                 continue
-            # Only treat it as displacement if the line references PTR.
             if "PTR" in s:
                 _assign(m.group(0))
 
     return key_to_id
 
 def _apply_ofs_map(line: str, ofs_map: dict[str, str]) -> str:
-    # Leave fs:0x28 unchanged.
     if "fs:" in line:
         return line
 
-    # Replace bracket expressions with ofsK while keeping operand shape.
     def _repl_bracket(m):
         key = m.group(0)
         k = ofs_map.get(key, None)
         if not k:
             return key
-        # Example: turn "[QWORD PTR ...]" into "ofs0".
         return k
 
     line = re.sub(r'\[(?:[^\]]*?)\]', _repl_bracket, line)
 
-    # Replace remaining bare address immediates (when paired with PTR) with ofsK.
     def _repl_hex(mm):
         key = mm.group(0)
         k = ofs_map.get(key, None)
@@ -716,11 +639,6 @@ def _apply_ofs_map(line: str, ofs_map: dict[str, str]) -> str:
     return line
 
 def _rewrite_branches_to_labels(lines: list[str]) -> list[str]:
-    """
-    jcc/jmp 0x...  -> jcc @jmpN
-    Am Ziel erster Instruktion '...@jmpN' als Suffix hinzufügen.
-    """
-    # 1) Collect branch targets.
     jcc_pat = re.compile(r'\b(j[a-z]{1,3})\s+0x[0-9a-fA-F]+', re.IGNORECASE)
     jmp_pat = re.compile(r'\bjmp\s+0x[0-9a-fA-F]+', re.IGNORECASE)
     addr_pat = re.compile(r'0x[0-9a-fA-F]+')
@@ -729,33 +647,31 @@ def _rewrite_branches_to_labels(lines: list[str]) -> list[str]:
     for s in lines:
         for mm in jcc_pat.finditer(s):
             a = addr_pat.search(mm.group(0))
-            if a: targets.append(a.group(0))
+            if a:
+                targets.append(a.group(0))
         for mm in jmp_pat.finditer(s):
             a = addr_pat.search(mm.group(0))
-            if a: targets.append(a.group(0))
+            if a:
+                targets.append(a.group(0))
 
-    # Preserve order and deduplicate targets.
     targets = list(dict.fromkeys(targets))
-    idx_map = {addr: i for i, addr in enumerate(targets)}  # 0..N → @jmpN
+    idx_map = {addr: i for i, addr in enumerate(targets)}
 
-    # 2) Rewrite branch operands.
     out = []
     for s in lines:
         def _br_sub(mm):
             a = addr_pat.search(mm.group(0))
-            if not a: return mm.group(0)
+            if not a:
+                return mm.group(0)
             n = idx_map.get(a.group(0), None)
-            if n is None: return mm.group(0)
+            if n is None:
+                return mm.group(0)
             op = mm.group(0).split()[0]
             return f"{op} @jmp{n}"
         s2 = re.sub(r'\b(j[a-z]{1,3})\s+0x[0-9a-fA-F]+', _br_sub, s, flags=re.IGNORECASE)
         s2 = re.sub(r'\bjmp\s+0x[0-9a-fA-F]+', _br_sub, s2, flags=re.IGNORECASE)
         out.append(s2)
 
-    # 3) Append the label suffix to the first instruction that lands on the target.
-    #    We approximate this by attaching the suffix to the following line
-    #    once block markers have been stripped.
-    #    (If real basic-block metadata is available, prefer that over this heuristic.)
     if not idx_map:
         return out
 
@@ -783,16 +699,49 @@ def _looks_like_new_prologue(line: str) -> bool:
     stripped = line.strip().lower()
     if not stripped:
         return False
-    return stripped.startswith("endbr64")
+    # gängige neuen Funktionsanfänge
+    if stripped.startswith("endbr64"):
+        return True
+    if stripped.startswith("push rbp") or stripped.startswith("push rbx"):
+        return True
+    return False
 
 def _cut_after_function_end(seq: list[str]) -> list[str]:
-    """Truncate once a standalone "ret" is encountered."""
-    out = []
-    for s in seq:
-        out.append(s)
-        if re.fullmatch(r"\s*ret\s*", s, flags=re.IGNORECASE):
-            break
+    """
+    Emit everything that plausibly belongs to the current function.  Only stop
+    after we saw a real return and the following instruction looks like a new
+    prologue (or clearly unrelated code).  Common post-ret tails such as stack
+    canary stubs, int3 padding, nops, and dangling @jmp labels are preserved.
+    """
+    out: list[str] = []
+    saw_ret = False
+
+    def _allowed_tail(line: str) -> bool:
+        stripped = line.strip().lower()
+        if not stripped:
+            return True
+        if stripped.startswith("ret"):
+            return True
+        if stripped.startswith(("call __stack_chk_fail", "jmp __stack_chk_fail", "ud2", "int3", "nop")):
+            return True
+        if stripped.startswith(("align", "db", "dw", "dd", "dq")):
+            return True
+        if stripped.startswith("@jmp"):
+            return True
+        return False
+
+    for line in seq:
+        if saw_ret:
+            if _looks_like_new_prologue(line):
+                break
+            if not _allowed_tail(line):
+                break
+        out.append(line)
+        if _RET_RE.match(line):
+            saw_ret = True
     return out
+
+
 
 def normalize_model_input_with_context_groups(
     raw_text: str,
@@ -800,55 +749,51 @@ def normalize_model_input_with_context_groups(
     target_func_obj,
     const_pool_for_target: dict
 ) -> str:
-    """
-    Baut den Einzeiler im Format:
-      HEADERS:#include A,#include B TARGET:instr;...; BY caller...; TO callee...;
-    und führt VORHER alle Preprocessing-Schritte durch:
-      - Block @ ... raus, Adresspräfixe raus
-      - call-Ziele auflösen (PLT/Symtab), sonst <FUNC>
-      - RIP-relative Konstanten mit const_pool ersetzen (STRx../FMTx../CMDx../DATx..)
-      - übrige Displacements → ofsK (pro Bereich konsistent)
-      - Branches → @jmpN (+ Zielmarken als Suffix)
-      - Spacing straffen (kein Space nach ',' und ';')
-    """
     lines = _tokenize_model_input(raw_text)
 
     includes = []
-    groups = []  # [(name, seq_lines)] ordered as: target, optional BY marker, caller groups, optional TO marker, callee groups.
+    groups = []
     cur = []
-    section = None  # Tracks the current section ('target', 'caller', 'callee', or None).
+    section = None
 
-    # Group lines by section.
     for s in lines:
-        if s.startswith("HEADERS:"):
+        s_lower = s.lower()
+        s_upper = s.upper()
+
+        if s_lower.startswith("headers:"):
             continue
-        if s.startswith("#include"):
+        if s_lower.startswith("#include"):
+            if s.strip() == "#include":
+                continue
             includes.append(s)
             continue
-        if s.startswith("Target:"):
+        if s_lower.startswith("target:"):
             if cur and section:
-                groups.append((section, cur)); cur = []
+                groups.append((section, cur))
+                cur = []
             section = 'target'
             continue
-        if s == "BY":
+        if s_upper == "BY":
             if cur and section:
-                groups.append((section, cur)); cur = []
+                groups.append((section, cur))
+                cur = []
             groups.append(("BY", []))
             section = None
             continue
-        if s == "TO" or s.startswith("Callee:"):
-            if s == "TO":
+        if s_upper == "TO" or s_lower.startswith("callee:"):
+            if s_upper == "TO":
                 groups.append(("TO", []))
                 section = None
                 continue
-            # Callee section header.
             if cur and section:
-                groups.append((section, cur)); cur = []
+                groups.append((section, cur))
+                cur = []
             section = 'callee'
             continue
-        if s.startswith("Caller:"):
+        if s_lower.startswith("caller:"):
             if cur and section:
-                groups.append((section, cur)); cur = []
+                groups.append((section, cur))
+                cur = []
             section = 'caller'
             continue
 
@@ -863,7 +808,6 @@ def normalize_model_input_with_context_groups(
             groups.append((section, cur))
             cur = []
 
-        # Normalize each line step by step.
         s = _replace_rip_rel_with_pool(s, const_pool_for_target)
         s = _rewrite_calls(s, project)
 
@@ -872,10 +816,18 @@ def normalize_model_input_with_context_groups(
     if cur and section:
         groups.append((section, cur))
 
-    # Normalize each section (target/caller/callee) and apply ofs/branch rewrites.
+    def _ensure_prologue_first(seq: list[str]) -> list[str]:
+        for idx, line in enumerate(seq):
+            if line.strip().lower().startswith("endbr64"):
+                if idx == 0:
+                    return seq
+                return [seq[idx]] + seq[:idx] + seq[idx+1:]
+        return seq
+
     def _norm_seq(seq: list[str]) -> str:
         if not seq:
             return ""
+        seq = _ensure_prologue_first(seq)
         seq2 = _rewrite_branches_to_labels(seq)
         seq2 = _fuse_libc_calls(seq2)
         seq2 = _cut_after_function_end(seq2)
@@ -890,15 +842,16 @@ def normalize_model_input_with_context_groups(
     if includes:
         parts.append("HEADERS:" + ",".join(includes))
 
-    # Emit TARGET first.
+    # TARGET zuerst (alle vorhandenen Segmente nummerieren)
+    target_idx = 0
     for name, seq in groups:
         if name == "target":
-            parts.append("TARGET:" + _norm_seq(seq))
-            break
+            target_idx += 1
+            tag = "TARGET:" if target_idx == 1 else f"TARGET{target_idx}:"
+            parts.append(tag + _norm_seq(seq))
 
+    # BY (Caller)
     added_by = False
-    added_to = False
-
     for name, seq in groups:
         if name == "caller":
             grp = _norm_seq(seq)
@@ -908,6 +861,8 @@ def normalize_model_input_with_context_groups(
                     added_by = True
                 parts.append(grp)
 
+    # TO (Callee)
+    added_to = False
     for name, seq in groups:
         if name == "callee":
             grp = _norm_seq(seq)
@@ -917,7 +872,43 @@ def normalize_model_input_with_context_groups(
                     added_to = True
                 parts.append(grp)
 
+    # ======= AB HIER darfst du erst den finalen String bauen =======
     out = " ".join([p for p in parts if p])
-    # Final tightening in case stray spaces around commas/semicolons remain.
+
+    # auto-header detection
+    needed = set()
+    low = out.lower()
+    if "printf(" in out or "fprintf(" in out or "puts(" in out or "putchar(" in out:
+        needed.add("#include <stdio.h>")
+    if "strlen(" in out or "strcmp(" in out or "strcpy(" in out:
+        needed.add("#include <string.h>")
+    if "malloc(" in out or "free(" in out or "exit(" in out:
+        needed.add("#include <stdlib.h>")
+    if "assert(" in out or "__assert_fail@" in out:
+        needed.add("#include <assert.h>")
+
+    if out.startswith("HEADERS:"):
+        m = _SECTION_SPLIT_RE.search(out)
+        if m:
+            header_part = out[:m.start()]
+            rest_part = out[m.start():]
+        else:
+            header_part = out
+            rest_part = ""
+
+        existing = header_part[len("HEADERS:"):].split(",")
+        existing = [e for e in (x.strip() for x in existing) if e and e != "#include"]
+
+        for h in needed:
+            if h not in existing:
+                existing.append(h)
+
+        out = "HEADERS:" + ",".join(existing)
+        if rest_part:
+            out += " " + rest_part.lstrip()
+    else:
+        if needed:
+            out = "HEADERS:" + ",".join(sorted(needed)) + " " + out
+
     out = _tighten_commas_semicolons(out)
     return out

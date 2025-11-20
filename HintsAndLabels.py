@@ -340,8 +340,8 @@ def annotate_real_c_body_with_placeholders(real_src, const_pool):
         if not matched:
             print(f"  [MISS FINAL] {repr(orig[:40])}")
 
-    annotated = annotated.replace("stderr", "STREAM_STDERR")
-    annotated = annotated.replace("stdout", "STREAM_STDOUT")
+    # annotated = annotated.replace("stderr", "STREAM_STDERR")
+    # annotated = annotated.replace("stdout", "STREAM_STDOUT")
     return annotated
 
 '''
@@ -361,7 +361,7 @@ def finalize_label_for_training(func_name, real_src, const_pool, dwarf_lookup):
 
     Steps:
     1. Annotate the real source with placeholders (STRx..., CMDx..., FMTx...)
-    2. Prepend the DWARF signature hint if available
+    2. Use the DWARF signature hint only if we have no source body
 
     Returns:
         final_label (str) or None
@@ -372,15 +372,12 @@ def finalize_label_for_training(func_name, real_src, const_pool, dwarf_lookup):
 
     sig_hint = build_signature_hint_from_lookup(func_name, dwarf_lookup)
 
-    if annotated_body and sig_hint:
-        return sig_hint.strip() + "\n" + annotated_body.strip()
-
     if annotated_body:
+        # Prefer the real source (annotated) when available to avoid duplicate
+        # function signatures in downstream datasets.
         return annotated_body.strip()
 
     if sig_hint:
         return sig_hint.strip()
 
     return None
-
-

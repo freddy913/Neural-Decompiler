@@ -353,7 +353,9 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
         print("Failed to load the binary project or CFG.")
         return
 
+    # TODO: rewind if addr2line is still needed and what target_src_loc is used for
     addr2line = build_addr2line_resolver(TARGET_BINARY_PATH)
+    ####
 
     target_func = next(cfg.functions.get_by_name(TARGET_FUNCTION_NAME), None)
     target_src_loc = addr2line(target_func.addr) if target_func else None
@@ -362,24 +364,28 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
         print(f"Function '{TARGET_FUNCTION_NAME}' not found.")
         return
 
-    TARGET_FUNC_ADDR = target_func.addr
+    target_func_data = get_function_data(target_func, project, MYTOKENIZER)
+    # if target func token size > CONTEXT_THRESHOLD_TOKENS: break from here; no decompilation possible
+    if target_func_data.get("token_count", 0) > CONTEXT_THRESHOLD_TOKENS:
+        print(f"[WARN] Target function token count {target_func_data.get('token_count')} exceeds context threshold {CONTEXT_THRESHOLD_TOKENS}. Skipping sample generation.")
+        return
     
+    TARGET_FUNC_ADDR = target_func.addr
     all_functions_map = {func.addr: func for func in cfg.functions.values()}
     print(f"\n--- Target function identified: '{TARGET_FUNCTION_NAME}' at {hex(target_func.addr)} ---")
 
-    target_func_data = get_function_data(target_func, project, MYTOKENIZER)
-    context_funcs = []
-
+    # TODO: rewind if dwarf_lookup is still needed
     dwarf_ref = dwarf_lookup
     if mode == "train" and dwarf_ref is None:
         dwarf_ref = build_dwarf_lookup_for_repo(os.path.dirname(TARGET_BINARY_PATH))
+    ####
 
     if UseContext == "true":
-        context_candidates = get_context_candidates_with_degrees(target_func, cfg)
-        caller_degrees = context_candidates['callers']
-        callee_degrees = context_candidates['callees']
+        context_funcs = get_context_candidates_with_degrees(target_func, cfg)
+        caller_degrees = context_funcs['callers']
+        callee_degrees = context_funcs['callees']
 
-        candidate_funcs = (
+        context_candidates = (
             [(func, degree, 'caller') for func, degree in caller_degrees.items()] +
             [(func, degree, 'callee') for func, degree in callee_degrees.items()]
         )
@@ -395,7 +401,7 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
 
         seen_addresses = set()
         deduped_candidates = []
-        for func, degree, role in candidate_funcs:
+        for func, degree, role in context_candidates:
             if func.addr not in seen_addresses:
                 deduped_candidates.append((func, degree, role))
                 seen_addresses.add(func.addr)
@@ -410,7 +416,7 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
         for entry in candidate_func_data["all_functions"]:
             fobj = entry["function_obj"]
             entry["src_loc"] = addr2line(fobj.addr)
-
+            
         context_funcs = apply_heuristic(
             target_func_data,
             candidate_func_data,
@@ -424,9 +430,10 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
             target_src_loc=target_src_loc,
         ) or []
 
+    ## TODO: REMOVE CHUNKPLAN BECAUSE WE DONT CHUNK 
     chunk_plan = target_func_data.get("chunk_plan")
     chunk_strategy = target_func_data.get("chunk_strategy")
-
+    ####
     header_block = build_header_block_from_binary(TARGET_BINARY_PATH)
 
     model_input_str = build_prompt_and_write_debug(
@@ -451,10 +458,12 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
         "model_input": formatted_input,
     }
 
+    ## TODO: REMOVE CHUNKPLAN BECAUSE WE DONT CHUNK
     if chunk_plan:
         sample["chunk_plan"] = chunk_plan
     if chunk_strategy:
         sample["chunk_strategy"] = chunk_strategy
+    ####
 
     if mode == "train":
         real_src = get_real_c_code(
@@ -554,7 +563,7 @@ def main():
     parser.add_argument(
         "--UseContext",
         choices=["true", "false"],
-        default="false",
+        default="true",
         help="Use Context: 'true' for adding context to the input string, 'false' for only the target as input"
     )
 
