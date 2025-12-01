@@ -187,8 +187,16 @@ def update_c_file(file_path, program_index):
     '''
     next_program = "executable" + program_index
     # Read file
-    with open(file_path, 'r',errors='ignore') as file:
-        lines = file.readlines()
+    try:
+        with open(file_path, 'r',errors='ignore') as file:
+            lines = file.readlines()
+    except FileNotFoundError:
+        print(f"[WARN] Source file not found for annotation: {file_path}")
+        return
+    except OSError as e:
+        print(f"[WARN] Could not open source file {file_path}: {e}")
+        return
+    
     if lines and lines[-1].startswith("//executable"): #
         if next_program not in lines[-1]:
             lines[-1] = lines[-1].strip()+", "+next_program # strip is relevant to remove \n new line. Note: When we append, we need to explicitly mark a newline. Is strip really needed?
@@ -196,8 +204,11 @@ def update_c_file(file_path, program_index):
         # Note: 'lastline','newline' will be written to same line without linebreak despite lines.append
         lines.append("\n//"+next_program)
     # Write the modified content back to the file
-    with open(file_path, 'w',errors='ignore') as file:
-        file.writelines(lines)
+    try: 
+        with open(file_path, 'w',errors='ignore') as file:
+            file.writelines(lines)
+    except OSError as e:
+        print(f"[WARN] Could not write annotation to {file_path}: {e}")
 
 def initiateObjectToBinary(args, directory_path): # directory_path is a repo path in COMPILED (the repo contains the object files).
     dest_path = args.dest_path # COMPILE
@@ -231,9 +242,12 @@ def initiateObjectToBinary(args, directory_path): # directory_path is a repo pat
                 # The moment the undefined list is empty we can compile to an executeable, ohterwise when all files have been traversed and we found nothing we terminate.
                 relevant_object_files = recursive_dependency_scan(key, value['undefined_U_Symbols'], dependency) # Last argument is for loop-avoidance purposes
                 #dependency[key]['dependentOn'] = relevant_object_files
-                program_path = os.path.join(directory_path,'executable')
-                compiler_setting = f'gcc -o {program_path}'
+
                 program_index = str(len(compile_commands)) # Used to name the programs starting with program0
+                program_path = os.path.join(directory_path,'executable' + program_index)
+
+                compiler_bin = args.compiler 
+                compiler_setting = f'{compiler_bin} -o {program_path}'
                 # We generate the compile commands of the form: gcc -o program_index main.o other.o ..., where index is the i-th program.
                 compile_commands.append(compiler_setting+str(len(compile_commands))+ ' ' + key + ' ' + ' '.join(relevant_object_files))
                 # Here we append at the end of each source file .c the line "//<program_path1>, <program_path2>, ...".
@@ -304,7 +318,23 @@ def list_immediate_folders(directory):
     return immediate_folders
 
 def parallel_process(args):
-    with Pool(args.number_of_processes) as p:
+    repositories = list_immediate_folders(args.dest_path)
+    if not repositories:
+        print("[INFO] No repositories found in COMPILED – nothing to link.")
+        return
+
+    cpu_count = multiprocessing.cpu_count() or 1
+
+    requested = args.number_of_processes or cpu_count
+    if requested <= 0:
+        requested = cpu_count
+
+    n_proc = max(1, min(requested, cpu_count, len(repositories)))
+
+    print(f"[INFO] Found {len(repositories)} repositories with object files.")
+    print(f"[INFO] Using {n_proc} worker processes (requested={requested}, cpus={cpu_count}).")
+
+    with Pool(processes=n_proc) as p:
         p.starmap(initiateObjectToBinary,
                   [(args, entry) for entry in list_immediate_folders(args.dest_path)])
 
