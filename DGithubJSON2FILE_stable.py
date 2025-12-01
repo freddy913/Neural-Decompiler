@@ -27,10 +27,100 @@ import json
 import argparse
 import gzip
 import shutil
+import hashlib
 
 from argparse import RawTextHelpFormatter
 from multiprocessing import Pool  # https://docs.python.org/3/library/multiprocessing.html
 
+def repo_hash(name):
+    """Return a 14-char stable repo identifier."""
+    return hashlib.sha1(name.encode("utf-8")).hexdigest()[:14]
+
+def is_binary_string(s):
+    """Heuristik: Skip binary content."""
+    if isinstance(s, str):
+        s = s.encode("utf-8", errors="ignore")
+    return b'\x00' in s
+
+def process_repo(repo, target_dir, max_path_len, json_source):
+    try:
+        # Safe fetch and hashed repo name to avoid collisions 
+        repo_name = repo.get("repo_name", "unknown_repo").replace('/', '_')
+        files = repo.get("file_array", [])
+
+        repo_id = repo_hash(repo_name)
+        repo_dir = os.path.join(target_dir, repo_id)
+        repo_dir_abs = os.path.abspath(repo_dir)
+
+        # Create the base directory for the repository
+        os.makedirs(repo_dir_abs, exist_ok=True)
+
+        # Counters for manifest
+        written_count = 0
+        binary_skips = 0
+        unsafe_skips = 0
+        write_errors = 0
+
+        # Iterate through each file in the repository
+        for file_info in files:
+            file_path = file_info["file_path"]
+            file_content = file_info["file_content"]
+            
+            if not file_path:
+                print("[WARN] Missing file_path — skipping file")
+                continue
+
+            # C_COMPILE/<repo>/<file>(.c|.h)
+            full_path = os.path.join(repo_dir_abs, file_path)
+
+            # Normalize the path to remove any redundant slashes or dots
+            normalized_path = os.path.abspath(os.path.normpath(full_path))
+
+            if not normalized_path.startswith(repo_dir_abs + os.sep):
+                unsafe_skips += 1
+                print(f"[WARN] Unsafe path detected: {file_path}")
+                continue
+
+            # Checks first if max_path_len is set, and then checks if paths exceed maximal length
+            if max_path_len and len(normalized_path) > max_path_len:
+                print(f"[SKIP] Path too long: {normalized_path}")
+                continue
+
+            # Create any necessary directories for the file path
+            os.makedirs(os.path.dirname(normalized_path), exist_ok=True)
+
+            try:
+                if is_binary_string(file_content):
+                    binary_skips += 1
+                    print(f"[SKIP] Binary file: {file_path}")
+                    continue
+
+                with open(normalized_path, 'w', encoding='utf-8', errors='ignore') as f:
+                    f.write(file_content)
+            except Exception as e:
+                # This is the only tiny tweak: instead of exploding on weird paths, warn and move on
+                print(f"[WARN] Could not write {normalized_path}: {e}")
+                continue
+
+        manifest = {
+            "repo_name": repo_name,
+            "repo_hash": repo_id,
+            "json_source": json_source,
+            "file_count_total": len(files),
+            "file_count_written": written_count,
+            "skipped_binary": binary_skips,
+            "skipped_unsafe_paths": unsafe_skips,
+            "write_errors": write_errors,
+        }
+
+        manifest_path = os.path.join(repo_dir_abs, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as mf:
+            json.dump(manifest, mf, indent=2)
+
+    except Exception as e:
+        # same idea as original: skip bad repo
+        # original just continues silently; we add info but keep behaviour
+        print(f"[WARN] Repository failed: {e}")
 
 def initiateJSON2FILE(json_file, source_dir, target_dir):
     print(f'Target: {json_file} ...')
@@ -38,62 +128,18 @@ def initiateJSON2FILE(json_file, source_dir, target_dir):
 
     json_file_path = os.path.join(source_dir, json_file)
 
-    # Load the JSON data from the file
-    data = []
+    # data = [] TODO: we stream now instead of loading all at once
     with open(json_file_path, 'r', encoding='utf-8', errors='ignore') as file:
         for line in file:
             try:
-                data.append(json.loads(line))
+                repo = (json.loads(line))
             except Exception as e:
                 # keep same semantics, but don't blow up
-                print(e)
-                print(f"{json_file_path}: Found an error to load JSON")
+                print(f"[WARN] JSON decode error in {json_file}: {e}")
                 continue
 
-    # Iterate through each repository in the JSON data
-    for repo in data:
-        try:
-            repo_name = repo["repo_name"].replace('/', '_')
-            files = repo["file_array"]
-
-            # Create the base directory for the repository
-            repo_dir = os.path.join(target_dir, repo_name)
-            os.makedirs(repo_dir, exist_ok=True)
-
-            # Iterate through each file in the repository
-            for file_info in files:
-                file_path = file_info["file_path"]
-                file_content = file_info["file_content"]
-
-                # C_COMPILE/<repo>/<file>(.c|.h)
-                full_path = os.path.join(repo_dir, file_path)
-
-                absolute_path_length = os.path.abspath(full_path)
-
-                # Checks first if max_path_len is set, and then checks if paths exceed maximal length
-                if max_path_len and len(absolute_path_length) > max_path_len:
-                    continue
-
-                # Create any necessary directories for the file path
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-
-                # Normalize the path to remove any redundant slashes or dots
-                normalized_path = os.path.normpath(full_path)
-
-                try:
-                    with open(normalized_path, 'w', encoding='utf-8', errors='ignore') as f:
-                        f.write(file_content)
-                except Exception as e:
-                    # This is the only tiny tweak: instead of exploding on weird paths, warn and move on
-                    print(f"[WARN] Could not write {normalized_path}: {e}")
-                    continue
-
-        except Exception as e:
-            # same idea as original: skip bad repo
-            # original just continues silently; we add info but keep behaviour
-            print(f'[WARN] {json_file} caused the error {e}')
-            continue
-
+            # Iterate through each repository in the JSON data
+            process_repo(repo, target_dir, max_path_len, json_source=json_file)
 
 def process_single_json_file(args):
     json_files = os.listdir(args.source_path)
@@ -102,7 +148,8 @@ def process_single_json_file(args):
             initiateJSON2FILE,
             [(json_file, args.source_path, args.target_path) for json_file in json_files]
         )
-        p.terminate()
+        #p.terminate()
+        p.close() # lets current task clean up 
         p.join()
 
 
