@@ -14,6 +14,7 @@ from Config import (
     FUNCTION_TXT,
     ASSEMBLY_TXT,
     USE_ASSEMBLY_ONLY,
+    VERBOSE,
 )
 
 from Heuristic import (
@@ -160,7 +161,7 @@ def combine_chunk_outputs(chunk_plan, outputs_dir, target_name, binary_path=None
         return None
 
     if not os.path.isdir(outputs_dir):
-        print(f"[WARN] Chunk output directory '{outputs_dir}' does not exist.")
+        if WRITE_DEBUG_FILES: print(f"[WARN] Chunk output directory '{outputs_dir}' does not exist.")
         return None
 
     target_slug = _chunk_slug(target_name)
@@ -188,9 +189,9 @@ def combine_chunk_outputs(chunk_plan, outputs_dir, target_name, binary_path=None
             combined_parts.append(cf.read().strip())
 
     if not combined_parts:
-        print("[WARN] No chunk outputs were found to combine.")
+        if WRITE_DEBUG_FILES: print("[WARN] No chunk outputs were found to combine.")
         if missing:
-            print(f"[WARN] Missing chunk outputs: {', '.join(missing)}")
+            if WRITE_DEBUG_FILES: print(f"[WARN] Missing chunk outputs: {', '.join(missing)}")
         return None
 
     combined_path = os.path.join(output_dir, f"{slug}_combined.c")
@@ -198,7 +199,7 @@ def combine_chunk_outputs(chunk_plan, outputs_dir, target_name, binary_path=None
         out_f.write("\n\n".join(part for part in combined_parts if part))
 
     if missing:
-        print(f"[WARN] Missing chunk outputs: {', '.join(missing)}")
+        if WRITE_DEBUG_FILES: print(f"[WARN] Missing chunk outputs: {', '.join(missing)}")
 
     return combined_path
 
@@ -206,7 +207,7 @@ def build_prompt_and_write_debug(
     target_func_data,
     context_funcs,
     header_block,
-    write_debug_files=True,
+    write_debug_files=WRITE_DEBUG_FILES,
 ):
     """
     Builds the final input string for the model and writes debug files if specified.
@@ -355,7 +356,7 @@ def append_pair(model_input, label_c_code):
 
     _append_pair_jsonl(asm, lbl_full)
 
-    print(f"[OK {time.strftime('%H:%M:%S')}] wrote pair: asm={len(asm)} chars, lbl={len(lbl_full)} chars")
+    if VERBOSE: print(f"[OK {time.strftime('%H:%M:%S')}] wrote pair: asm={len(asm)} chars, lbl={len(lbl_full)} chars")
     if lbl_preview and lbl_preview != lbl_full:
         print(f"         label preview: {lbl_preview[:96]}{'…' if len(lbl_preview) > 96 else ''}")
     sys.stdout.flush()
@@ -368,13 +369,13 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
     'test' - build test sample for inference
     """
     if not os.path.isfile(TARGET_BINARY_PATH):
-        print(f"[ERR] Binary '{TARGET_BINARY_PATH}' not found. Build/compile the target before running build_sample.")
+        if WRITE_DEBUG_FILES: print(f"[ERR] Binary '{TARGET_BINARY_PATH}' not found. Build/compile the target before running build_sample.")
         return
 
     project, cfg = load_project(TARGET_BINARY_PATH)
 
     if project is None or cfg is None:
-        print("Failed to load the binary project or CFG.")
+        if WRITE_DEBUG_FILES: print("Failed to load the binary project or CFG.")
         return
 
     # TODO: rewind if addr2line is still needed and what target_src_loc is used for
@@ -385,13 +386,13 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
     target_src_loc = addr2line(target_func.addr) if target_func else None
 
     if target_func is None:
-        print(f"Function '{TARGET_FUNCTION_NAME}' not found.")
+        if WRITE_DEBUG_FILES: print(f"Function '{TARGET_FUNCTION_NAME}' not found.")
         return
 
     target_func_data = get_function_data(target_func, project, MYTOKENIZER)
     # if target func token size > CONTEXT_THRESHOLD_TOKENS: break from here; no decompilation possible
     if target_func_data.get("token_count", 0) > CONTEXT_THRESHOLD_TOKENS:
-        print(f"[WARN] Target function token count {target_func_data.get('token_count')} exceeds context threshold {CONTEXT_THRESHOLD_TOKENS}. Skipping sample generation.")
+        if WRITE_DEBUG_FILES: print(f"[WARN] Target function token count {target_func_data.get('token_count')} exceeds context threshold {CONTEXT_THRESHOLD_TOKENS}. Skipping sample generation.")
         return
     
     header_block = build_header_block_from_binary(TARGET_BINARY_PATH)
@@ -415,15 +416,15 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
         else:
             return 6500
 
-    raw_context_budget = compute_context_budget(target_tokens)
+    raw_context_budget = _compute_context_budget(target_tokens)
     MARKER_BUFFER_TOKENS = 128
     max_budget = CONTEXT_THRESHOLD_TOKENS - target_tokens - header_tokens - MARKER_BUFFER_TOKENS
     max_budget = max(0, max_budget)
     context_budget = min(raw_context_budget, max_budget)
-    
+
     TARGET_FUNC_ADDR = target_func.addr
     all_functions_map = {func.addr: func for func in cfg.functions.values()}
-    print(f"\n--- Target function identified: '{TARGET_FUNCTION_NAME}' at {hex(target_func.addr)} ---")
+    if VERBOSE: print(f"\n--- Target function identified: '{TARGET_FUNCTION_NAME}' at {hex(target_func.addr)} ---")
 
     # TODO: rewind if dwarf_lookup is still needed
     dwarf_ref = dwarf_lookup
@@ -440,15 +441,15 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
             [(func, degree, 'caller') for func, degree in caller_degrees.items()] +
             [(func, degree, 'callee') for func, degree in callee_degrees.items()]
         )
-
-        print("\n--- Context Analysis (Generation 1) ---")
-        print(f"Found {len(context_funcs['callers'])} unique calling function(s):")
-        for caller in sorted(list(context_funcs['callers']), key=lambda f: f.name):
-            print(f"  - '{caller.name}'")
+        if VERBOSE:
+            print("\n--- Context Analysis (Generation 1) ---")
+            print(f"Found {len(context_funcs['callers'])} unique calling function(s):")
+            for caller in sorted(list(context_funcs['callers']), key=lambda f: f.name):
+                print(f"  - '{caller.name}'")
             
-        print(f"\nFound {len(context_funcs['callees'])} unique called function(s):")
-        for callee in sorted(list(context_funcs['callees']), key=lambda f: f.name):
-            print(f"  - '{callee.name}'")
+            print(f"\nFound {len(context_funcs['callees'])} unique called function(s):")
+            for callee in sorted(list(context_funcs['callees']), key=lambda f: f.name):
+                print(f"  - '{callee.name}'")
 
         seen_addresses = set()
         deduped_candidates = []
@@ -458,11 +459,11 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
                 seen_addresses.add(func.addr)
 
         candidate_funcs_filtered = filter_candidate_funcs_runtime_safe(deduped_candidates, target_func)
-        print(f"\nAfter runtime-safe filtering, {len(candidate_funcs_filtered)} candidate functions remain...")
+        if VERBOSE: print(f"\nAfter runtime-safe filtering, {len(candidate_funcs_filtered)} candidate functions remain...")
 
         candidate_func_data = build_candidate_func_data(candidate_funcs_filtered, project, cfg, MYTOKENIZER)
 
-        print("\n--- Extracting Assembly Code ---")
+        if VERBOSE: print("\n--- Extracting Assembly Code ---")
 
         for entry in candidate_func_data["all_functions"]:
             fobj = entry["function_obj"]
@@ -654,28 +655,28 @@ def main():
             bin_path = parts[0]
             func_name = parts[1] if len(parts) > 1 and parts[1] else args.function_name
 
-            print(f"\n=== [{processed}] Processing {bin_path} :: {func_name} ===")
+            if VERBOSE: print(f"\n=== [{processed}] Processing {bin_path} :: {func_name} ===")
             try:
                 _set_target_config(bin_path, func_name)
                 result = build_sample(mode=mode, UseContext=UseContext, source_hint=source_hint_arg)
             except Exception as exc:
-                print(f"[WARN] Failed to process '{bin_path}' / '{func_name}': {exc}")
+                if WRITE_DEBUG_FILES: print(f"[WARN] Failed to process '{bin_path}' / '{func_name}': {exc}")
                 continue
 
             if result is None:
-                print(f"[WARN] build_sample returned no result.")
+                if WRITE_DEBUG_FILES: print(f"[WARN] build_sample returned no result.")
                 continue
 
             if mode == "train":
                 label = result.get("label_c_code")
                 if not label:
-                    print(f"[WARN] no label generated; skipping pair write.")
+                    if WRITE_DEBUG_FILES: print(f"[WARN] no label generated; skipping pair write.")
                     continue
                 append_pair(model_input=result["model_input"], label_c_code=label)
 
             successes += 1
 
-        print(f"\nBatch (worklist) complete. Succeeded: {successes}/{processed}")
+        if VERBOSE: print(f"\nBatch (worklist) complete. Succeeded: {successes}/{processed}")
         return
     # ========= ENDE NEU =========
 
@@ -690,16 +691,16 @@ def main():
 
         for repo_name, binary_path in _iter_compiled_binaries(compiled_root):
             processed += 1
-            print(f"\n=== [{processed}] Processing {repo_name}: {binary_path} ===")
+            if VERBOSE: print(f"\n=== [{processed}] Processing {repo_name}: {binary_path} ===")
             try:
                 _set_target_config(binary_path, args.function_name)
                 result = build_sample(mode=mode, UseContext=UseContext, source_hint=source_hint_arg)
             except Exception as exc:
-                print(f"[WARN] Failed to process '{binary_path}': {exc}")
+                if WRITE_DEBUG_FILES: print(f"[WARN] Failed to process '{binary_path}': {exc}")
                 continue
 
             if result is None:
-                print(f"[WARN] Skipping '{binary_path}': build_sample returned no result.")
+                if WRITE_DEBUG_FILES: print(f"[WARN] Skipping '{binary_path}': build_sample returned no result.")
                 continue
 
             chunk_state_path = None
@@ -707,10 +708,10 @@ def main():
             if chunk_plan:
                 chunk_state_path = persist_chunk_state(result)
                 if chunk_state_path:
-                    print(f"[Chunk] State saved to {chunk_state_path}")
+                    if VERBOSE: print(f"[Chunk] State saved to {chunk_state_path}")
                 expected_files = ", ".join(f"{entry['name']}.c" for entry in chunk_plan)
                 if expected_files:
-                    print(f"[Chunk] Expected output files: {expected_files}")
+                    if VERBOSE: print(f"[Chunk] Expected output files: {expected_files}")
                 if args.chunk_output_dir:
                     combined_path = combine_chunk_outputs(
                         chunk_plan,
@@ -720,22 +721,23 @@ def main():
                         output_dir=args.chunk_output_dir,
                     )
                     if combined_path:
-                        print(f"[Chunk] Combined output saved to {combined_path}")
+                        if VERBOSE: print(f"[Chunk] Combined output saved to {combined_path}")
 
             if mode == "train":
                 label = result.get('label_c_code')
                 if not label:
-                    print(f"[WARN] Skipping '{binary_path}': no label generated in train mode.")
+                    if WRITE_DEBUG_FILES: print(f"[WARN] Skipping '{binary_path}': no label generated in train mode.")
                     continue
                 append_pair(model_input=result['model_input'], label_c_code=label)
                 successes += 1
             else:
-                print(f"ContextRole: {result['context_role']}")
-                print(f"Target function: {result['target_function_name']}")
-                print(f"Model input:\n{result['model_input']}")
+                if VERBOSE:
+                    print(f"ContextRole: {result['context_role']}")
+                    print(f"Target function: {result['target_function_name']}")
+                    print(f"Model input:\n{result['model_input']}")
                 successes += 1
 
-        print(f"\nBatch processing complete. Succeeded: {successes}/{processed}")
+        if VERBOSE: print(f"\nBatch processing complete. Succeeded: {successes}/{processed}")
         return
 
     _set_target_config(args.binary_path, args.function_name)
@@ -754,21 +756,23 @@ def main():
         init_pair_files()
         label = result.get('label_c_code')
         if not label:
-            print("[WARN] No label generated in train mode; skipping pair write.")
+            if WRITE_DEBUG_FILES: print("[WARN] No label generated in train mode; skipping pair write.")
             return
 
         append_pair(model_input=result['model_input'], label_c_code=label)
 
-        print("\n--- Final Transformer Input ---")
-        print(f"ContextRole: {result['context_role']}")
-        print(f"Target function: {result['target_function_name']}")
-        print(f"Input tokens preview:\n{result['model_input']}")
-        print(f"\nLabel preview:\n{label}")
+        if VERBOSE:
+            print("\n--- Final Transformer Input ---")
+            print(f"ContextRole: {result['context_role']}")
+            print(f"Target function: {result['target_function_name']}")
+            print(f"Input tokens preview:\n{result['model_input']}")
+            print(f"\nLabel preview:\n{label}")
     else:
-        print("\n--- Test Mode Output ---")
-        print(f"ContextRole: {result['context_role']}")
-        print(f"Target function: {result['target_function_name']}")
-        print(f"Model input:\n{result['model_input']}")
+        if VERBOSE:
+            print("\n--- Test Mode Output ---")
+            print(f"ContextRole: {result['context_role']}")
+            print(f"Target function: {result['target_function_name']}")
+            print(f"Model input:\n{result['model_input']}")
 
     if chunk_plan:
         print("\n--- Chunk Plan ---")
