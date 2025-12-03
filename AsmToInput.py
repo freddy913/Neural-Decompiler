@@ -46,6 +46,29 @@ ASSEMBLY_TXT_PATH = os.path.join(INPUT_DIR, ASSEMBLY_TXT)
 PAIR_JSONL_PATH = None
 CHUNK_STATE_ROOT = os.path.join(".", "CHUNK_STATE")
 
+def compute_context_budget(target_token_count):
+    """
+    Nonlinear context budget based on decompilation and RAG literature. (!!8K Encoder)
+    """
+    if target_token_count <= 128:
+        return 1000
+    elif target_token_count <= 256:
+        return 1500
+    elif target_token_count <= 512:
+        return 2500
+    elif target_token_count <= 1024:
+        return 3500
+    elif target_token_count <= 2000:
+        return 5000
+    else:
+        return 6500
+
+def get_token_length_of_entry(entry, tokenizer):
+    if "token_count" in entry and entry["token_count"] is not None:
+        return entry["token_count"]
+    # fallback: use raw tokenizer length of assembly
+    asm = entry.get("assembly", "")
+    return len(tokenizer(asm, truncation=False)["input_ids"])
 
 def _binary_slug_from_path(binary_path: str) -> str:
     """
@@ -371,6 +394,33 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
         print(f"[WARN] Target function token count {target_func_data.get('token_count')} exceeds context threshold {CONTEXT_THRESHOLD_TOKENS}. Skipping sample generation.")
         return
     
+    header_block = build_header_block_from_binary(TARGET_BINARY_PATH)
+    if header_block:
+        header_tokens = len(MYTOKENIZER(header_block, truncation=False)["input_ids"])
+    else:
+        header_tokens = 0
+
+    target_tokens = target_func_data.get("token_count", 0)
+    def _compute_context_budget(target_token_count):
+        if target_token_count <= 128:
+            return 1000
+        elif target_token_count <= 256:
+            return 1500
+        elif target_token_count <= 512:
+            return 2500
+        elif target_token_count <= 1024:
+            return 3500
+        elif target_token_count <= 2000:
+            return 5000
+        else:
+            return 6500
+
+    raw_context_budget = compute_context_budget(target_tokens)
+    MARKER_BUFFER_TOKENS = 128
+    max_budget = CONTEXT_THRESHOLD_TOKENS - target_tokens - header_tokens - MARKER_BUFFER_TOKENS
+    max_budget = max(0, max_budget)
+    context_budget = min(raw_context_budget, max_budget)
+    
     TARGET_FUNC_ADDR = target_func.addr
     all_functions_map = {func.addr: func for func in cfg.functions.values()}
     print(f"\n--- Target function identified: '{TARGET_FUNCTION_NAME}' at {hex(target_func.addr)} ---")
@@ -421,7 +471,7 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
         context_funcs = apply_heuristic(
             target_func_data,
             candidate_func_data,
-            CONTEXT_THRESHOLD_TOKENS,
+            context_budget,
             cfg.functions.callgraph,
             all_functions_map,
             TARGET_FUNC_ADDR,
@@ -432,9 +482,13 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
             assembly_only=USE_ASSEMBLY_ONLY,
         ) or []
 
+        
+
     ## TODO: REMOVE CHUNKPLAN BECAUSE WE DONT CHUNK 
-    chunk_plan = target_func_data.get("chunk_plan")
-    chunk_strategy = target_func_data.get("chunk_strategy")
+    #chunk_plan = target_func_data.get("chunk_plan")
+    chunk_plan = None
+    #chunk_strategy = target_func_data.get("chunk_strategy")
+    chunk_strategy = None
     ####
     header_block = build_header_block_from_binary(TARGET_BINARY_PATH)
 
