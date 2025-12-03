@@ -29,6 +29,7 @@ RUNTIME_ENTRY_FUNCTIONS = {
 BASIC_SCORE = 100
 DEGREE = 2  # Default degree for context candidate selection
 WRITE_DEBUG_FILES = False
+VERBOSE = False
 FUNCTION_TXT = "function.txt"
 ASSEMBLY_TXT = "assembly.txt"
 PAIR_JSON = "pair.json"
