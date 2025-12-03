@@ -4,7 +4,7 @@ import string
 
 import angr
 from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_REG_RIP
-
+from typing import Optional, Tuple, Dict
 from Config import MYTOKENIZER
 
 STREAM_STDERR = "STREAM_STDERR"
@@ -56,17 +56,26 @@ def _normalize_symbol_generic(sym: str | None) -> str:
     key = base.lower()
     return _LIBC_ALIAS_MAP.get(key, key)
 
+_PROJECT_CACHE: dict[str, tuple[Optional[angr.Project], object]] = {}
+
 def load_project(binary_path):
     """
     takes a path to a binary and loads an angr project
     returns the loaded angr.project object and the cfg-object
     failures have to be handled as file not found or invalid binary
     """
+
+    abs_path = os.path.abspath(binary_path)
+    cached = _PROJECT_CACHE.get(abs_path)
+    if cached is not None:
+        return cached
+    
     try:
-        project = angr.Project(binary_path, auto_load_libs=False)
+        project = angr.Project(abs_path, auto_load_libs=False)
     except Exception as e:
         print(f"Failed to load project: {e}")
-        return None
+        _PROJECT_CACHE[abs_path] = (None, None)
+        return (None, None)
     
     try:
         cfg = project.analyses.CFGEmulated(
@@ -78,6 +87,7 @@ def load_project(binary_path):
         print(f"Failed to generate CFG: {e}")
         return None
     
+    _PROJECT_CACHE[abs_path] = (project, cfg)
     return project, cfg
 
 def get_all_functions(cfg):

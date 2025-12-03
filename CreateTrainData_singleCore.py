@@ -1,12 +1,6 @@
-#!/usr/bin/env python3
-import os
-import re
-import shlex
-import subprocess
+import os, re, shlex, subprocess
 from pathlib import Path
 from typing import List, Tuple
-import multiprocessing as mp
-import argparse
 
 _EXECUTABLE_SUFFIX_RE = re.compile(r"executable(\d+)", re.IGNORECASE)
 _FUNCTION_DEF_RE = re.compile(
@@ -89,7 +83,7 @@ def _resolve_binary_path(executable_candidate: str) -> Tuple[str, bool]:
 
 
 def collect_executable_function_metadata(
-    base_dir: str = "./C_COMPILE",
+    base_dir: str = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/C_COMPILE",
 ) -> List[Tuple[str, str, List[str]]]:
     """
     Traverse repositories in base_dir and extract function metadata for executable-tagged files.
@@ -122,7 +116,6 @@ def collect_executable_function_metadata(
             if not lines:
                 continue
 
-            # Check for executable marker in first/last significant comment
             first_significant = next((line.strip() for line in lines if line.strip()), "")
             if not (first_significant.startswith("//") or first_significant.startswith("/*")):
                 continue
@@ -151,7 +144,6 @@ def collect_executable_function_metadata(
                     continue
                 function_names.append(candidate)
 
-            # deduplicate while preserving order
             seen = set()
             ordered_function_names: List[str] = []
             for name in function_names:
@@ -167,67 +159,10 @@ def collect_executable_function_metadata(
 
     return results
 
-
-# -------------------------------------------------------------------
-# Worker-Funktion für einen einzelnen AsmToInput-Aufruf
-# -------------------------------------------------------------------
-def _run_single_task(task):
-    """
-    task: (script_path, binary_path, source_path, func_name)
-
-    Führt:
-      python3 AsmToInput.py --mode train --binary-path ... --function-name ... --source-path ... --UseContext true
-    aus und gibt (func_name, binary_path, success_bool) zurück.
-    """
-    script_path, binary_path, source_path, func = task
-
-    cmd = [
-        "python3",
-        script_path,
-        "--mode", "train",
-        "--binary-path", binary_path,
-        "--function-name", func,
-        "--source-path", source_path,
-        "--UseContext", "true",
-    ]
-
-    pretty_cmd = " ".join(shlex.quote(part) for part in cmd)
-    print(f"[RUN] {pretty_cmd}")
-
-    try:
-        result = subprocess.run(
-            cmd,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        if result.returncode != 0:
-            print(f"[WARN] failed for {func} ({binary_path}), exit={result.returncode}")
-            if result.stderr:
-                print(result.stderr)
-            return (func, binary_path, False)
-
-        print(f"[OK] {func} ({binary_path})")
-        return (func, binary_path, True)
-
-    except Exception as exc:
-        print(f"[EXCEPTION] {func} ({binary_path}): {exc}")
-        return (func, binary_path, False)
-
-
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--workers", type=int, default=0,
-                        help="Number of parallel workers (default: env CREATE_TRAIN_WORKERS or all cores)")
-    args = parser.parse_args()
-
     script_path = os.path.join(os.path.dirname(__file__), "AsmToInput.py")
 
-    meta = collect_executable_function_metadata()
-    tasks = []
-
-    for source_path, exec_path, functions in meta:
+    for source_path, exec_path, functions in collect_executable_function_metadata():
         if not functions:
             continue
 
@@ -235,55 +170,24 @@ def main():
         if not binary_found:
             print(f"[WARN] compiled binary not found for {exec_path}: {binary_path}")
             continue
-
         expected_path = _to_compiled_binary_path(exec_path)
         if binary_path != expected_path:
             print(f"[INFO] using fallback binary for {exec_path}: {binary_path}")
-
-        # pro Funktion ein Task
         for func in functions:
-            tasks.append((script_path, binary_path, source_path, func))
-
-    if not tasks:
-        print("[INFO] No functions found for training data generation.")
-        return
-
-    # Anzahl Worker: entweder aus ENV oder alle Cores
-    try:
-        env_workers = int(os.environ.get("CREATE_TRAIN_WORKERS", "0"))
-    except ValueError:
-        env_workers = 0
-
-    if args.workers > 0:
-        num_workers = args.workers
-    elif env_workers > 0:
-        num_workers = env_workers
-    else:
-        num_workers = mp.cpu_count()
-
-    print(f"[INFO] Prepared {len(tasks)} tasks")
-    print(f"[INFO] Using {num_workers} parallel workers\n")
-
-    # Multiprocessing-Pool starten
-    with mp.Pool(processes=num_workers) as pool:
-        results = pool.map(_run_single_task, tasks)
-
-    # Zusammenfassung
-    print("\n================ SUMMARY ================")
-    ok_count = 0
-    fail_count = 0
-    for func, binary_path, success in results:
-        status = "OK" if success else "FAIL"
-        print(f"{func:<30} {status}  ({binary_path})")
-        if success:
-            ok_count += 1
-        else:
-            fail_count += 1
-
-    print("=========================================")
-    print(f"Total: {len(results)}, OK: {ok_count}, FAIL: {fail_count}")
-    print("=========================================\n")
-
+            cmd = [
+                "python3",
+                script_path,
+                "--mode", "train",
+                "--binary-path", binary_path,
+                "--function-name", func,
+                "--source-path", source_path,
+                "--UseContext", "true",
+            ]
+            print(f"[RUN] {' '.join(shlex.quote(part) for part in cmd)}")
+            try:
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as exc:
+                print(f"[WARN] failed for {func} ({binary_path}): {exc}")
 
 if __name__ == "__main__":
     main()

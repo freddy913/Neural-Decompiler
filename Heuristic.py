@@ -425,6 +425,9 @@ def build_header_block_from_angr_subset(project, func_objs):  # TODO: implement 
     # Placeholder: collect external symbols via angr and map them to headers.
     ...
     pass
+
+_HEADER_CACHE: dict[str, str] = {}
+
 def build_header_block_from_binary(binary_path: str) -> str:
     """
     Main-Entry:
@@ -437,17 +440,24 @@ def build_header_block_from_binary(binary_path: str) -> str:
         ...
     If no headers are found, returns an empty string.
     """
-    symbols = extract_external_symbols(binary_path)
+    abs_path = os.path.abspath(binary_path)
+    cached = _HEADER_CACHE.get(abs_path)
+    if cached is not None:
+        return cached
+    
+    symbols = extract_external_symbols(abs_path)
     headers = map_symbols_to_headers(symbols)
 
     if not headers:
-        return ""
-
-    lines = ["HEADERS:"]
-    for h in headers:
-        lines.append(f"#include {h}")
-
-    return "\n".join(lines) + "\n"
+        block = ""
+    else:
+        lines = ["HEADERS:"]
+        for h in headers:
+            lines.append(f"#include {h}")
+        block = "\n".join(lines) + "\n"
+    
+    _HEADER_CACHE[abs_path] = block
+    return block
 
 
 def _count_non_junk_callees(func_obj, callgraph, all_program_funcs, junk_set=JUNK_FUNCTIONS):

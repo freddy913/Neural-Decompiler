@@ -196,6 +196,7 @@ def extract_functions_from_o(o_path):
                         })
     return results
 
+_DWARF_CACHE: dict[str, dict] = {}
 
 def build_dwarf_lookup_for_repo(compiled_dir_root):
     '''
@@ -212,6 +213,11 @@ def build_dwarf_lookup_for_repo(compiled_dir_root):
         ...
     ]
     '''
+    compiled_dir_root = os.path.abspath(compiled_dir_root)
+    cached = _DWARF_CACHE.get(compiled_dir_root)
+    if cached is not None:
+        return cached
+    
     func_to_o = {} 
     type_to_o = {}
 
@@ -229,8 +235,11 @@ def build_dwarf_lookup_for_repo(compiled_dir_root):
             for type_info in dwarf_types:
                 type_name = type_info["name"]
                 type_to_o.setdefault(type_name, []).append(type_info)
+    
+    dwarf_lookup = { "functions": func_to_o, "types": type_to_o }
+    _DWARF_CACHE[compiled_dir_root] = dwarf_lookup
 
-    return { "functions": func_to_o, "types": type_to_o }
+    return dwarf_lookup
 
 
 def build_signature_hint_from_lookup(func_name, dwarf_lookup):

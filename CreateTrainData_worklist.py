@@ -5,7 +5,8 @@ import shlex
 import subprocess
 from pathlib import Path
 from typing import List, Tuple
-import multiprocessing as mp
+import multiprocessing as mp  
+import tempfile
 import argparse
 
 _EXECUTABLE_SUFFIX_RE = re.compile(r"executable(\d+)", re.IGNORECASE)
@@ -122,7 +123,6 @@ def collect_executable_function_metadata(
             if not lines:
                 continue
 
-            # Check for executable marker in first/last significant comment
             first_significant = next((line.strip() for line in lines if line.strip()), "")
             if not (first_significant.startswith("//") or first_significant.startswith("/*")):
                 continue
@@ -151,7 +151,6 @@ def collect_executable_function_metadata(
                     continue
                 function_names.append(candidate)
 
-            # deduplicate while preserving order
             seen = set()
             ordered_function_names: List[str] = []
             for name in function_names:
@@ -169,7 +168,7 @@ def collect_executable_function_metadata(
 
 
 # -------------------------------------------------------------------
-# Worker-Funktion für einen einzelnen AsmToInput-Aufruf
+# NEU: Worker-Funktion für einen einzelnen AsmToInput-Aufruf
 # -------------------------------------------------------------------
 def _run_single_task(task):
     """
@@ -208,13 +207,68 @@ def _run_single_task(task):
                 print(result.stderr)
             return (func, binary_path, False)
 
+        # Optional: stdout silencing oder logging:
+        # if result.stdout:
+        #     print(result.stdout)
+
         print(f"[OK] {func} ({binary_path})")
         return (func, binary_path, True)
 
     except Exception as exc:
         print(f"[EXCEPTION] {func} ({binary_path}): {exc}")
         return (func, binary_path, False)
+    
+def _run_binary_task(task):
+    """
+    task: (script_path, worklist_path, source_path)
 
+    Ruft:
+      python3 AsmToInput.py --mode train --batch --worklist ... --source-path ... --UseContext true
+    auf und lässt AsmToInput alle Funktionen aus der Worklist abarbeiten.
+    """
+    script_path, worklist_path, source_path = task
+
+    cmd = [
+        "python3",
+        script_path,
+        "--mode", "train",
+        "--batch",
+        "--worklist", worklist_path,
+        "--UseContext", "true",
+        "--source-path", source_path,
+    ]
+
+    pretty_cmd = " ".join(shlex.quote(part) for part in cmd)
+    print(f"[RUN BINARY] {pretty_cmd}")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(f"[WARN] batch failed for worklist={worklist_path}, exit={result.returncode}")
+            if result.stderr:
+                print(result.stderr)
+            return (worklist_path, False)
+
+        print(f"[OK] batch for worklist={worklist_path}")
+        return (worklist_path, True)
+
+    except Exception as exc:
+        print(f"[EXCEPTION] batch for worklist={worklist_path}: {exc}")
+        return (worklist_path, False)
+
+
+def _make_worklist_for_binary(binary_path, functions):
+    f = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False)
+    for func in functions:
+        f.write(f"{binary_path}\t{func}\n")
+    f.close()
+    return f.name
 
 def main():
     parser = argparse.ArgumentParser()
@@ -240,9 +294,10 @@ def main():
         if binary_path != expected_path:
             print(f"[INFO] using fallback binary for {exec_path}: {binary_path}")
 
-        # pro Funktion ein Task
-        for func in functions:
-            tasks.append((script_path, binary_path, source_path, func))
+        worklist_path = _make_worklist_for_binary(binary_path, functions)
+        tasks.append((script_path, worklist_path, source_path))
+        # for func in functions:
+        #     tasks.append((script_path, binary_path, source_path, func))
 
     if not tasks:
         print("[INFO] No functions found for training data generation.")
@@ -266,15 +321,16 @@ def main():
 
     # Multiprocessing-Pool starten
     with mp.Pool(processes=num_workers) as pool:
-        results = pool.map(_run_single_task, tasks)
+        # results = pool.map(_run_single_task, tasks)
+        results = pool.map(_run_binary_task, tasks)
 
     # Zusammenfassung
     print("\n================ SUMMARY ================")
     ok_count = 0
     fail_count = 0
-    for func, binary_path, success in results:
+    for worklist_path, success in results:
         status = "OK" if success else "FAIL"
-        print(f"{func:<30} {status}  ({binary_path})")
+        print(f"{worklist_path:<40} {status}  ({binary_path})")
         if success:
             ok_count += 1
         else:
