@@ -249,7 +249,7 @@ def initiateObjectToBinary(args, directory_path): # directory_path is a repo pat
                 compiler_bin = args.compiler 
                 compiler_setting = f'{compiler_bin} -o {program_path}'
                 # We generate the compile commands of the form: gcc -o program_index main.o other.o ..., where index is the i-th program.
-                compile_commands.append(compiler_setting+str(len(compile_commands))+ ' ' + key + ' ' + ' '.join(relevant_object_files))
+                compile_commands.append(compiler_setting+ ' ' + key + ' ' + ' '.join(relevant_object_files))
                 # Here we append at the end of each source file .c the line "//<program_path1>, <program_path2>, ...".
                 # Note: One source file can be used for multiple programs.
                 # Don't forget the object file with the main entry function, which is not involved in the relevant_object_files
