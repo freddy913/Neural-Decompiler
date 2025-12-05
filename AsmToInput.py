@@ -24,6 +24,7 @@ from Heuristic import (
     filter_candidate_funcs_runtime_safe,
     build_candidate_func_data,
     build_header_block_from_binary,
+    is_relevant_user_like_function,
 )
 
 from HintsAndLabels import (
@@ -383,11 +384,17 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
     ####
 
     target_func = next(cfg.functions.get_by_name(TARGET_FUNCTION_NAME), None)
-    target_src_loc = addr2line(target_func.addr) if target_func else None
 
     if target_func is None:
         if WRITE_DEBUG_FILES: print(f"Function '{TARGET_FUNCTION_NAME}' not found.")
         return
+    
+    if not is_relevant_user_like_function(target_func):
+        if WRITE_DEBUG_FILES:
+            print(f"[SKIP] Target function '{TARGET_FUNCTION_NAME}' classified as non-user / runtime / allocator.")
+        return None
+
+    target_src_loc = addr2line(target_func.addr) if target_func else None
 
     target_func_data = get_function_data(target_func, project, MYTOKENIZER)
     # if target func token size > CONTEXT_THRESHOLD_TOKENS: break from here; no decompilation possible
