@@ -24,18 +24,16 @@ def get_context_candidates(target_func, cfg):
     callees = set()
 
     try:
-        for pred_addr in callgraph.successors(target_func.addr):
-            caller_func = cfg.functions.get_by_addr(pred_addr)
-            if caller_func:
-                callers.add(caller_func)
+        for callee_addr in callgraph.successors(target_func.addr):
+            callee_func = cfg.functions.get_by_addr(callee_addr)
+            if callee_func: callees.add(callee_func)
     except Exception as e:
         pass
 
     try:
-        for succ_addr in callgraph.predecessors(target_func.addr):
-            callee_func = cfg.functions.get_by_addr(succ_addr)
-            if callee_func:
-                callees.add(callee_func)
+        for caller_addr in callgraph.predecessors(target_func.addr):
+            caller_func = cfg.functions.get_by_addr(caller_addr)
+            if caller_func: callers.add(caller_func)
     except Exception as e:
         pass
 
@@ -1072,19 +1070,28 @@ def _load_file_text(path):
         return None
 
 
-def _scan_dir_for_func_once(dir_path, func_name):
+def _scan_dir_for_func_once(dir_path, func_name, exact_filename=None):
     if not dir_path or not os.path.isdir(dir_path):
         return None
-    for fname in os.listdir(dir_path):
-        if not fname.endswith(".c"):
-            continue
-        full_path = os.path.join(dir_path, fname)
-        text = _load_file_text(full_path)
-        if not text:
-            continue
-        snippet = _extract_function_from_source(text, func_name)
-        if snippet:
-            return snippet
+
+    if exact_filename:
+        full = os.path.join(dir_path, exact_filename)
+        if os.path.isfile(full):
+            text = _load_file_text(full)
+            snippet = _extract_function_from_source(text, func_name)
+            if snippet: return snippet
+
+    # #Fallback 
+    # for fname in os.listdir(dir_path):
+    #     if not fname.endswith(".c"):
+    #         continue
+    #     full_path = os.path.join(dir_path, fname)
+    #     text = _load_file_text(full_path)
+    #     if not text:
+    #         continue
+    #     snippet = _extract_function_from_source(text, func_name)
+    #     if snippet:
+    #         return snippet
     return None
 
 
@@ -1193,6 +1200,30 @@ def _extract_source_text_from_die(candidate, binary_path=None):
 
     return _extract_function_from_source(source_text, func_name)
 
+def _die_addr_range(candidate):
+    die = candidate.get("die") if candidate else None
+    if not die:
+        return None
+
+    low = die.attributes.get("DW_AT_low_pc")
+    high = die.attributes.get("DW_AT_high_pc")
+
+    if not low:
+        return None
+
+    low_pc = low.value
+
+    if not high:
+        return (low_pc, low_pc)
+
+    # DW_AT_high_pc can be absolute addr OR an offset from low_pc (DWARF spec)
+    hv = high.value
+    if isinstance(hv, int) and hv < 0x100000:  # heuristic: small => offset
+        high_pc = low_pc + hv
+    else:
+        high_pc = hv
+
+    return (low_pc, high_pc)
 
 def get_real_c_code(
     func_obj,
@@ -1237,7 +1268,7 @@ def get_real_c_code(
         c_base_dir = os.path.dirname(c_base_dir)
 
     if c_base_dir:
-        snippet = _scan_dir_for_func_once(c_base_dir, func_name)
+        snippet = _scan_dir_for_func_once(c_base_dir, func_name, exact_filename=f"{func_name}.c")
         if snippet:
             return snippet
 
@@ -1245,7 +1276,20 @@ def get_real_c_code(
         func_map = dwarf_lookup.get("functions", dwarf_lookup)
         candidates = func_map.get(func_name) if func_map else None
         if candidates:
-            best_candidate = pick_best_match(candidates, binary_path or "")
+            best_candidate = None
+            for cand in candidates:
+                r = _die_addr_range(cand)
+                if not r:
+                    continue
+                lo, hi = r
+                if lo <= func_obj.addr < hi:
+                    best_candidate = cand
+                    break
+
+            # fallback to old heuristic
+            if best_candidate is None:
+                best_candidate = pick_best_match(candidates, binary_path or "")
+
             snippet = _extract_source_text_from_die(best_candidate, binary_path=binary_path)
             if snippet:
                 return snippet
@@ -1311,37 +1355,26 @@ def apply_heuristic(
     mode,
     dwarf_lookup=None,
     target_src_loc=None,
-    assembly_only=False,
+    assembly_only=True, # Default auf True, da wir nur ASM wollen
 ):
     """
-    Choses context functions based on the heuristic strategy within a token budget.
+    Wählt Kontext-Funktionen (nur Assembly) basierend auf Score und Budget.
     """
     context_candidates_data = context_candidates_data or {}
     all_candidate_entries = context_candidates_data.get('all_functions', []) or []
-    current_budget = budget - target_func_data['token_count']
+    
+    # 1. Budget berechnen (WICHTIG: budget ist schon bereinigt übergeben!)
+    current_budget = budget 
     
     if current_budget <= 0:
         return []
 
+    # Fingerprints für Scoring
     target_struct_fp = extract_struct_fingerprint(target_func_data.get("assembly",""))
     target_lex_fp = _extract_lexical_fingerprint(target_func_data.get("assembly", ""))
     target_api_sig = _extract_api_signature(target_func_data.get("assembly", ""))
     
-    try:
-        total_context_tokens = context_candidates_data.get('total_token_count', 0)
-        if current_budget > total_context_tokens:
-            return all_candidate_entries.copy()
-    except Exception as e:
-        pass
-    if assembly_only:
-        REDUCTION_LEVEL = 0
-    elif current_budget <= 0.15 * budget:
-        REDUCTION_LEVEL = 2
-    elif current_budget <= 0.6 * budget:
-        REDUCTION_LEVEL = 1
-    else:
-        REDUCTION_LEVEL = 0
-
+    # 2. Kandidaten scoren
     scored_candidates = []
     for candidate in all_candidate_entries:
         candidate['score'] = _calculate_candidate_score(
@@ -1356,137 +1389,28 @@ def apply_heuristic(
         )
         scored_candidates.append(candidate)
 
+    # 3. Sortieren: Höchster Score zuerst, bei Gleichstand kleinster Token-Count
     scored_candidates = sorted(
         scored_candidates,
         key=lambda x: (-x.get('score', 0), x.get('token_count', float('inf')))
     )
 
-    context_funcs = [] # TODO REMOVE: CURRENT DUMMY PARAMETER
-    if REDUCTION_LEVEL == 2:
-        ## only including C_CODE as context functions
-        # TODO            current budget = add_remaining_cadidates_as_c_code(....)
+    # 4. Auffüllen (Nur Assembly)
+    context_funcs = []
+    remaining_candidates = scored_candidates
 
-        return context_funcs
-    elif REDUCTION_LEVEL == 1:
-        # Target is midsize: attempt a hybrid context strategy.
-        print("INFO: Target function is midsize. Applying 'Hybrid Context' strategy.")
-        #TODO: refactor the add_remanining_candidates_to_context to support new logic: here hybrid!!!!!!!!!!!!! TODO
-        current_budget, scored_candidates = add_remaining_candidates_to_context(scored_candidates, context_funcs, current_budget, REDUCTION_LEVEL)
-        current_budget, scored_candidates = add_remaining_candidates_as_c_code_to_context(scored_candidates, context_funcs, current_budget, mode)
-        return context_funcs # TODO remove context_funcs as return parameter?
+    # Hier nutzen wir einfach deine existierende add_candidate_to_context Logik
+    # Wir iterieren durch die sortierte Liste und nehmen, was passt.
+    to_remove = []
+    for candidate in remaining_candidates:
+        if current_budget <= 0:
+            break
 
-        # # Step 1: score candidates with the existing scoring system.
-        # context_funcs = []
-        # remaining_candidates = all_candidate_entries.copy()
-        
-        # for candidate in remaining_candidates:
-        #     candidate['score'] = _calculate_candidate_score(
-        #         candidate,
-        #         callgraph,
-        #         all_functions_map,
-        #         target_addr,
-        #         target_struct_fp=target_struct_fp,
-        #         target_src_loc=target_src_loc,
-        #         target_lex_fp=target_lex_fp,
-        #         target_api_sig=target_api_sig,
-        #     )
-
-        # # Step 2: estimate C token size for the top candidates and decide between assembly vs C.
-        # important_candidates = sorted(
-        #     remaining_candidates,
-        #     key=lambda x: -x.get('score', 0)
-        # )[:5]
-
-        # for candidate in important_candidates:
-        #     if current_budget <= 0:
-        #         break
-            
-        #     cand_tokens = candidate.get('token_count', 0)
-        #     if cand_tokens > 0.5 * budget:
-        #         continue
-
-        #     if cand_tokens <= current_budget:
-        #         current_budget = add_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
-        #         continue
-
-        #     estimated_c_token_size = estimate_c_token_complexity(candidate['function_obj'])
-        #     # TODO: tighten C-token estimation; current heuristic is coarse.
-
-        #     if estimated_c_token_size <= current_budget:
-        #         # Prefer real source if available; skip experimental decompilation path.
-        #         c_approx = (
-        #             get_real_c_code(
-        #                 candidate['function_obj'],
-        #                 project,
-        #                 purpose="context",
-        #                 dwarf_lookup=dwarf_lookup,
-        #             )
-        #             if mode == "train"
-        #             else None
-        #         )
-        #         if c_approx:
-        #             candidate['c_approx'] = c_approx
-        #             current_budget = add_decompiled_candidate_to_context(remaining_candidates, context_funcs, candidate, current_budget)
-        #         continue
-        #     continue
-
-        # if current_budget > 0 and remaining_candidates:
-        #     for candidate in remaining_candidates:
-        #         candidate['score'] = _calculate_candidate_score(
-        #             candidate,
-        #             callgraph,
-        #             all_functions_map,
-        #             target_addr,
-        #             target_struct_fp=target_struct_fp,
-        #             target_src_loc=target_src_loc,
-        #             target_lex_fp=target_lex_fp,
-        #             target_api_sig=target_api_sig,
-        #         )
-
-        #     current_budget, should_break = add_remaining_candidates_to_context(remaining_candidates, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
-
-        # return context_funcs
-
-    elif REDUCTION_LEVEL == 0:
-
-        #TODO: refactor the add_remanining_candidates_to_context to support new logic
-        current_budget = add_remaining_candidates_to_context(scored_candidates, context_funcs, current_budget, REDUCTION_LEVEL)
-        # TODO: remove should_break logic
-        if assembly_only:
-            return context_funcs # TODO remove context_funcs as return parameter?
-        elif assembly_only is False:
-            # TODO            current budget = add_remaining_cadidates_as_c_code(....)
-            return context_funcs # TODO remove context_funcs as return parameter?
-
-
-        # # Prioritize by iteratively adding candidates from the lowest-degree group one-by-one until the budget is exhausted, then repeat for the next-lowest degree group.
-        # while remaining_candidates and current_budget > 0:
-        #     current_degree, total_tokens_current_degree = token_degree_level_check(remaining_candidates)
-        #     if current_degree is None:
-        #         break
-            
-        #     # TODO: Decide whether to always iterate lower-degree groups first.
-        #     degree_group = [c for c in remaining_candidates if c.get('degree') == current_degree]
-        #     if not degree_group:
-        #         remaining_candidates = [c for c in remaining_candidates if c.get('degree') != current_degree]
-        #         continue
-
-        #     # if current_budget >= total_tokens_current_degree:
-        #     #     process_degree_group(degree_group, context_funcs, remaining_candidates, current_budget)
-
-        #     # Prioritize candidates from this degree group; stop if nothing fits.
-        #     for candidate in remaining_candidates:
-        #         candidate['score'] = _calculate_candidate_score(
-        #             candidate,
-        #             callgraph,
-        #             all_functions_map,
-        #             target_addr,
-        #             target_struct_fp=target_struct_fp,
-        #             target_src_loc=target_src_loc,
-        #             target_lex_fp=target_lex_fp,
-        #             target_api_sig=target_api_sig,
-        #         )
-        #     current_budget, should_break = add_remaining_candidates_to_context(degree_group, remaining_candidates, context_funcs, current_budget, callgraph, all_functions_map)
-
-        #     if should_break:
-        #         break
+        toks = candidate.get('token_count', 0)
+        if toks <= current_budget:
+            candidate['append_mode'] = 'assembly'
+            context_funcs.append(candidate)
+            current_budget -= toks
+            to_remove.append(candidate)
+    
+    return context_funcs

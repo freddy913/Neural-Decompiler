@@ -48,6 +48,17 @@ ASSEMBLY_TXT_PATH = os.path.join(INPUT_DIR, ASSEMBLY_TXT)
 PAIR_JSONL_PATH = None
 CHUNK_STATE_ROOT = os.path.join(".", "CHUNK_STATE")
 
+class MockProject:
+    def __init__(self, binary_path):
+        self.filename = binary_path
+        # Dummy loader for robustness in case get_real_c_code accesses it
+        self.loader = type('obj', (object,), {'main_object': type('obj', (object,), {'binary': binary_path})})
+
+class MockFunction:
+    def __init__(self, name):
+        self.name = name
+        self.addr = 0   # Dummy address
+
 def compute_context_budget(target_token_count):
     """
     Nonlinear context budget based on decompilation and RAG literature. (!!8K Encoder)
@@ -363,15 +374,53 @@ def append_pair(model_input, label_c_code):
     sys.stdout.flush()
     return True
 
+
+
 def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_lookup=None):
     """
     mode:
-    'train' - build sample for training
+    'train' - build sample for training (with early exit if no C code)
     'test' - build test sample for inference
     """
     if not os.path.isfile(TARGET_BINARY_PATH):
-        if WRITE_DEBUG_FILES: print(f"[ERR] Binary '{TARGET_BINARY_PATH}' not found. Build/compile the target before running build_sample.")
+        if WRITE_DEBUG_FILES: print(f"[ERR] Binary '{TARGET_BINARY_PATH}' not found.")
         return
+
+    # ==============================================================================
+    # SUPER EARLY EXIT (Vor angr): Prüfen, ob wir überhaupt C-Code haben
+    # ==============================================================================
+    if mode == "train":
+        # 1. DWARF Lookup laden (das geht schnell via pyelftools)
+        dwarf_ref = dwarf_lookup
+        if dwarf_ref is None:
+            dwarf_ref = build_dwarf_lookup_for_repo(os.path.dirname(TARGET_BINARY_PATH))
+        
+        # 2. Mock-Objekte erstellen, um get_real_c_code zu täuschen
+        mock_proj = MockProject(TARGET_BINARY_PATH)
+        mock_func = MockFunction(TARGET_FUNCTION_NAME)
+        
+        # 3. C-Code suchen (rein über Filesystem / DWARF, ohne angr)
+        check_src = get_real_c_code(
+            mock_func,
+            mock_proj,
+            purpose="target",
+            source_hint=source_hint,
+            dwarf_lookup=dwarf_ref
+        )
+        
+        # 4. Validierung des gefundenen Codes
+        valid_c = False
+        if check_src:
+            body = check_src.strip()
+            # Der Check aus HintsAndLabels: Muss Klammern haben und lang genug sein
+            if "{" in body and "}" in body and len(body) > 20:
+                valid_c = True
+        
+        if not valid_c:
+            if VERBOSE: 
+                print(f"[FAST-SKIP] No valid C source for '{TARGET_FUNCTION_NAME}' found. Skipping angr load.")
+            return None
+    # ==============================================================================
 
     project, cfg = load_project(TARGET_BINARY_PATH)
 
@@ -379,14 +428,12 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
         if WRITE_DEBUG_FILES: print("Failed to load the binary project or CFG.")
         return
 
-    # TODO: rewind if addr2line is still needed and what target_src_loc is used for
     addr2line = build_addr2line_resolver(TARGET_BINARY_PATH)
-    ####
 
     target_func = next(cfg.functions.get_by_name(TARGET_FUNCTION_NAME), None)
 
     if target_func is None:
-        if WRITE_DEBUG_FILES: print(f"Function '{TARGET_FUNCTION_NAME}' not found.")
+        if WRITE_DEBUG_FILES: print(f"Function '{TARGET_FUNCTION_NAME}' not found in CFG.")
         return
     
     if not is_relevant_user_like_function(target_func):
@@ -397,9 +444,9 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
     target_src_loc = addr2line(target_func.addr) if target_func else None
 
     target_func_data = get_function_data(target_func, project, MYTOKENIZER)
-    # if target func token size > CONTEXT_THRESHOLD_TOKENS: break from here; no decompilation possible
+    
     if target_func_data.get("token_count", 0) > CONTEXT_THRESHOLD_TOKENS:
-        if WRITE_DEBUG_FILES: print(f"[WARN] Target function token count {target_func_data.get('token_count')} exceeds context threshold {CONTEXT_THRESHOLD_TOKENS}. Skipping sample generation.")
+        if WRITE_DEBUG_FILES: print(f"[WARN] Target function token count {target_func_data.get('token_count')} exceeds context threshold. Skipping.")
         return
     
     header_block = build_header_block_from_binary(TARGET_BINARY_PATH)
@@ -409,55 +456,39 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
         header_tokens = 0
 
     target_tokens = target_func_data.get("token_count", 0)
-    def _compute_context_budget(target_token_count):
-        if target_token_count <= 128:
-            return 1000
-        elif target_token_count <= 256:
-            return 1500
-        elif target_token_count <= 512:
-            return 2500
-        elif target_token_count <= 1024:
-            return 3500
-        elif target_token_count <= 2000:
-            return 5000
-        else:
-            return 6500
+    
+    # Budget calculation inline
+    if target_tokens <= 128: context_budget_raw = 1000
+    elif target_tokens <= 256: context_budget_raw = 1500
+    elif target_tokens <= 512: context_budget_raw = 2500
+    elif target_tokens <= 1024: context_budget_raw = 3500
+    elif target_tokens <= 2000: context_budget_raw = 5000
+    else: context_budget_raw = 6500
 
-    raw_context_budget = _compute_context_budget(target_tokens)
     MARKER_BUFFER_TOKENS = 128
     max_budget = CONTEXT_THRESHOLD_TOKENS - target_tokens - header_tokens - MARKER_BUFFER_TOKENS
     max_budget = max(0, max_budget)
-    context_budget = min(raw_context_budget, max_budget)
+    context_budget = min(context_budget_raw, max_budget)
 
     TARGET_FUNC_ADDR = target_func.addr
     all_functions_map = {func.addr: func for func in cfg.functions.values()}
     if VERBOSE: print(f"\n--- Target function identified: '{TARGET_FUNCTION_NAME}' at {hex(target_func.addr)} ---")
 
-    # TODO: rewind if dwarf_lookup is still needed
+    # DWARF Ref holen (falls wir im Test-Mode sind oder es oben noch nicht geholt haben)
     dwarf_ref = dwarf_lookup
     if mode == "train" and dwarf_ref is None:
         dwarf_ref = build_dwarf_lookup_for_repo(os.path.dirname(TARGET_BINARY_PATH))
-    ####
 
     if UseContext == "true":
-        context_funcs = get_context_candidates_with_degrees(target_func, cfg)
-        caller_degrees = context_funcs['callers']
-        callee_degrees = context_funcs['callees']
+        context_funcs_raw = get_context_candidates_with_degrees(target_func, cfg)
+        caller_degrees = context_funcs_raw['callers']
+        callee_degrees = context_funcs_raw['callees']
 
         context_candidates = (
             [(func, degree, 'caller') for func, degree in caller_degrees.items()] +
             [(func, degree, 'callee') for func, degree in callee_degrees.items()]
         )
-        if VERBOSE:
-            print("\n--- Context Analysis (Generation 1) ---")
-            print(f"Found {len(context_funcs['callers'])} unique calling function(s):")
-            for caller in sorted(list(context_funcs['callers']), key=lambda f: f.name):
-                print(f"  - '{caller.name}'")
-            
-            print(f"\nFound {len(context_funcs['callees'])} unique called function(s):")
-            for callee in sorted(list(context_funcs['callees']), key=lambda f: f.name):
-                print(f"  - '{callee.name}'")
-
+        
         seen_addresses = set()
         deduped_candidates = []
         for func, degree, role in context_candidates:
@@ -466,11 +497,8 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
                 seen_addresses.add(func.addr)
 
         candidate_funcs_filtered = filter_candidate_funcs_runtime_safe(deduped_candidates, target_func)
-        if VERBOSE: print(f"\nAfter runtime-safe filtering, {len(candidate_funcs_filtered)} candidate functions remain...")
-
+        
         candidate_func_data = build_candidate_func_data(candidate_funcs_filtered, project, cfg, MYTOKENIZER)
-
-        if VERBOSE: print("\n--- Extracting Assembly Code ---")
 
         for entry in candidate_func_data["all_functions"]:
             fobj = entry["function_obj"]
@@ -489,16 +517,8 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
             target_src_loc=target_src_loc,
             assembly_only=USE_ASSEMBLY_ONLY,
         ) or []
-
-        
-
-    ## TODO: REMOVE CHUNKPLAN BECAUSE WE DONT CHUNK 
-    #chunk_plan = target_func_data.get("chunk_plan")
-    chunk_plan = None
-    #chunk_strategy = target_func_data.get("chunk_strategy")
-    chunk_strategy = None
-    ####
-    header_block = build_header_block_from_binary(TARGET_BINARY_PATH)
+    else:
+        context_funcs = []
 
     model_input_str = build_prompt_and_write_debug(
         target_func_data,
@@ -522,21 +542,18 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
         "model_input": formatted_input,
     }
 
-    ## TODO: REMOVE CHUNKPLAN BECAUSE WE DONT CHUNK
-    if chunk_plan:
-        sample["chunk_plan"] = chunk_plan
-    if chunk_strategy:
-        sample["chunk_strategy"] = chunk_strategy
-    ####
-
     if mode == "train":
-        real_src = get_real_c_code(
-            target_func,
-            project,
-            purpose="target",
-            source_hint=source_hint,
-            dwarf_lookup=dwarf_ref,
-        )
+        # Wir können hier check_src von oben wiederverwenden, wenn es gesetzt ist!
+        # Falls nicht (z.B. im Test Mode), holen wir es neu.
+        real_src = locals().get('check_src', None) 
+        if real_src is None:
+             real_src = get_real_c_code(
+                target_func,
+                project,
+                purpose="target",
+                source_hint=source_hint,
+                dwarf_lookup=dwarf_ref,
+            )
 
         formatted_output = finalize_label_for_training(
             getattr(target_func, "name", None),
@@ -546,16 +563,14 @@ def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_looku
         )
 
         if formatted_output is None:
-            formatted_output = "/* NO_GROUND_TRUTH_AVAILABLE */"
+            # Sollte durch Early Exit nicht mehr passieren, aber sicher ist sicher
+            if VERBOSE: print("[SKIP] Final label validation failed (late check).")
+            return None
 
         sample["label_c_code"] = formatted_output
         sample["context_role"] = "train"
 
     elif mode == "test":
-        sample["context_role"] = "test"
-
-    else:
-        print(f"[WARN] Unknown mode '{mode}', defaulting to inference semantics.")
         sample["context_role"] = "test"
 
     return sample

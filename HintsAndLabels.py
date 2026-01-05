@@ -362,7 +362,71 @@ This is what you feed as "label_c_code" during training:
 At inference the model won't see DWARF or real_src,
 but it has learned to output that style.
 '''
+def strip_c_comments(code: str) -> str:
+    """
+    Removes //... and /*...*/ comments,
+    without breaking strings/chars.
+    """
+    OUT, SLASH, LINE, BLOCK, STRING, CHAR, ESC = range(7)
+    state = OUT
+    out = []
+    quote = None  # " or '
 
+    i = 0
+    while i < len(code):
+        c = code[i]
+
+        if state == OUT:
+            if c == '/':
+                state = SLASH
+            elif c == '"':
+                out.append(c); state = STRING
+            elif c == "'":
+                out.append(c); state = CHAR
+            else:
+                out.append(c)
+        elif state == SLASH:
+            if c == '/':
+                state = LINE
+            elif c == '*':
+                state = BLOCK
+            else:
+                out.append('/')
+                out.append(c)
+                state = OUT
+        elif state == LINE:
+            if c == '\n':
+                out.append('\n')
+                state = OUT
+        elif state == BLOCK:
+            if c == '*' and i + 1 < len(code) and code[i + 1] == '/':
+                i += 1
+                state = OUT
+        elif state == STRING:
+            out.append(c)
+            if c == '\\':
+                state = ESC
+                quote = '"'
+            elif c == '"':
+                state = OUT
+        elif state == CHAR:
+            out.append(c)
+            if c == '\\':
+                state = ESC
+                quote = "'"
+            elif c == "'":
+                state = OUT
+        elif state == ESC:
+            out.append(c)
+            state = STRING if quote == '"' else CHAR
+
+        i += 1
+
+    # if we ended in SLASH state, output the slash
+    if state == SLASH:
+        out.append('/')
+
+    return ''.join(out)
 
 def finalize_label_for_training(func_name, real_src, const_pool, dwarf_lookup):
     '''
@@ -378,15 +442,18 @@ def finalize_label_for_training(func_name, real_src, const_pool, dwarf_lookup):
     annotated_body = None
     if real_src:
         annotated_body = annotate_real_c_body_with_placeholders(real_src, const_pool)
+        annotated_body = strip_c_comments(annotated_body)
 
-    sig_hint = build_signature_hint_from_lookup(func_name, dwarf_lookup)
+    #sig_hint = build_signature_hint_from_lookup(func_name, dwarf_lookup)
 
     if annotated_body:
-        # Prefer the real source (annotated) when available to avoid duplicate
-        # function signatures in downstream datasets.
-        return annotated_body.strip()
+        body = annotated_body.strip()
+        if "{" in body and "}" in body and len(body) > 20:
+            return body
 
-    if sig_hint:
-        return sig_hint.strip()
+        return None
+
+    # if sig_hint:
+    #     return sig_hint.strip()
 
     return None
