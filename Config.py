@@ -1,21 +1,14 @@
 import logging
 from transformers import AutoTokenizer
 
-# Logging configuration to be less verbose
 logging.getLogger('cle').setLevel('ERROR')
 logging.getLogger('pyvex').setLevel('ERROR')
-# Set angr's main logger to WARNING to see important messages but not debug info
 logging.getLogger('angr').setLevel('WARNING')
 
-# Global configs
-# TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED/0b507b7039d18d/executable0"
-# TARGET_FUNCTION_NAME = "main"
-TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED_test/2dango_Custom-UDP-packet/executable0"
-TARGET_FUNCTION_NAME = "main"
-# TARGET_BINARY_PATH = "/home/freddy/dev/neural-decompiler/Neural-Decompiler/COMPILED/00test_preproc/executable0"
-# TARGET_FUNCTION_NAME = "main"
+TARGET_BINARY_PATH = "./Neural-Decompiler/COMPILED/repository/executable"
+TARGET_FUNCTION_NAME = "function"
 
-CONTEXT_THRESHOLD_TOKENS = 8192 # TODO: substract puffer for label tokens later in post processing
+CONTEXT_THRESHOLD_TOKENS = 8192 
 MYTOKENIZER = AutoTokenizer.from_pretrained("google/long-t5-tglobal-base") 
 JUNK_FUNCTIONS = {"printf", "malloc", "free", "scanf", "puts", "gets", "exit", "socket", "sendto", "close", "setuid", "setsockopt",
     "strlen", "perror", "getpid", "inet_aton", "gethostbyname", "strtol"}

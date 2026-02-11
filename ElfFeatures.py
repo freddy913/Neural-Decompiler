@@ -78,10 +78,15 @@ def load_project(binary_path):
         return (None, None)
     
     try:
-        cfg = project.analyses.CFGEmulated(
+        # cfg = project.analyses.CFGEmulated(
+        #     normalize=True,
+        #     context_sensitivity_level=2,  # Higher sensitivity improves call-site resolution.
+        #     resolve_indirect_jumps=True
+        # )
+        cfg = project.analyses.CFGFast(
             normalize=True,
-            context_sensitivity_level=2,  # Higher sensitivity improves call-site resolution.
-            resolve_indirect_jumps=True
+            resolve_indirect_jumps=True,
+            data_references=True  # Wichtig für Konstanten!
         )
     except Exception as e:
         print(f"Failed to generate CFG: {e}")
@@ -110,7 +115,10 @@ def get_function_assembly(func):
         return ""
 
     lines = []
-    for block in func.blocks:
+
+    sorted_blocks = sorted(list(func.blocks), key=lambda b: b.addr)
+
+    for block in sorted_blocks:
         try:
             capstone_block = block.capstone
         except Exception:
@@ -120,9 +128,11 @@ def get_function_assembly(func):
         insns = getattr(capstone_block, "insns", [])
         if insns:
             for insn in insns:
-                lines.append(str(insn))
+                row = f"{hex(insn.address)}: {insn.mnemonic} {insn.op_str}"
+                lines.append(row.strip())
         else:
-            lines.append(str(capstone_block))
+            lines.append(f"; Empty Block @ {hex(block.addr)}")
+
     return "\n".join(lines)
 
 def get_token_count(assembly_code, tokenizer=MYTOKENIZER):
@@ -156,17 +166,8 @@ def get_function_data(func, project, tokenizer):
     
     return {'name': func.name, 'assembly': assembly_code, 'token_count': token_count}
 
-'''
-SECTION 2: Constant pool extraction.
-Goal:
-Find static data (strings, shell commands, format strings, etc.) referenced
-by a function's machine code, assign placeholders like STRx401abc, CMDx402def, ...
-This is what Akin described:
-    printf("hello world")  ->  printf(STRx4019e7)
-Later at inference we won't have DWARF, but the model should still emit STRx...,
-which we can post-process back to actual bytes from memory.
-'''
 
+# Constant pool extraction.
 def _is_printable_ascii(buf_bytes):
     '''
     Heuristic: buffer is considered "text-like" if >=70% of bytes are printable ASCII.
@@ -371,9 +372,6 @@ def try_extract_rodata_addr_from_insn(insn):
     cs_insn = _get_capstone_insn(insn)
     if cs_insn is None:
         return None
-
-    # we also need the top-level wrapper's address/size for RIP-relative calc
-    # angr wrappers always have .address / .size, so fall back there
     insn_addr = getattr(insn, "address", None)
     insn_size = getattr(insn, "size", None)
     if insn_addr is None and hasattr(cs_insn, "address"):

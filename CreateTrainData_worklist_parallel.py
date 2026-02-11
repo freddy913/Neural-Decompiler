@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import os
 import re
 import shlex
@@ -41,6 +40,8 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 
 _SIMPLE_FUNC_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(", re.MULTILINE)
 
+TASK_TIMEOUT_SECONDS = 60
+
 def _extract_function_names(text: str):
     names = []
     for m in _SIMPLE_FUNC_RE.finditer(text):
@@ -48,7 +49,6 @@ def _extract_function_names(text: str):
         if name in _C_CONTROL_KEYWORDS:
             continue
         names.append(name)
-    # Einmalige Reihenfolge beibehalten
     return list(dict.fromkeys(names))
 
 
@@ -104,13 +104,10 @@ def _resolve_binary_path(executable_candidate: str) -> Tuple[str, bool]:
 def _fast_process_file(path: str):
     try:
         size = os.path.getsize(path)
-        # Optional: Größe begrenzen, siehe unten
         if MAX_FILE_BYTES and size > MAX_FILE_BYTES:
-            # Debug-Print, wenn du sehen willst, was du wegwirfst:
-            # print(f"[SKIP SIZE] {path} ({size} bytes)")
             return []
     except OSError:
-        return []  # nicht lesbar
+        return []
 
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -125,12 +122,10 @@ def _fast_process_file(path: str):
     if not lines:
         return []
 
-    # erste sinnvolle Zeile
     first = next((l.strip() for l in lines if l.strip()), "")
     if not (first.startswith("//") or first.startswith("/*")):
         return []
 
-    # letzte sinnvolle Zeile
     last = ""
     for l in reversed(lines):
         s = l.strip()
@@ -145,7 +140,6 @@ def _fast_process_file(path: str):
     if not markers:
         return []
 
-    # NEU: einfache Funktionssuche
     funcs = _extract_function_names(text)
     if not funcs:
         return []
@@ -181,7 +175,6 @@ def collect_executable_function_metadata(base_dir: str = "./C_COMPILE", workers=
 
     processed = 0
     with mp.Pool(processes=workers) as pool:
-        # chunksize reduziert Overhead bei vielen Dateien enorm
         for r in pool.imap_unordered(_fast_process_file, file_iter, chunksize=50):
             processed += 1
             if processed % 1000 == 0:
@@ -192,15 +185,12 @@ def collect_executable_function_metadata(base_dir: str = "./C_COMPILE", workers=
     print(f"[SCAN] done. {processed} files processed, {len(results)} metadata entries.")
     return results
 
-# -------------------------------------------------------------------
-# NEU: Worker-Funktion für einen einzelnen AsmToInput-Aufruf
-# -------------------------------------------------------------------
 def _run_single_task(task):
     """
     task: (script_path, binary_path, source_path, func_name)
 
     Führt:
-      python3 AsmToInput.py --mode train --binary-path ... --function-name ... --source-path ... --UseContext true
+      python3 AsmToInput.py --mode test --binary-path ... --function-name ... --source-path ... --UseContext true
     aus und gibt (func_name, binary_path, success_bool) zurück.
     """
     script_path, binary_path, source_path, func = task
@@ -208,7 +198,7 @@ def _run_single_task(task):
     cmd = [
         "python3",
         script_path,
-        "--mode", "train",
+        "--mode", "test",
         "--binary-path", binary_path,
         "--function-name", func,
         "--source-path", source_path,
@@ -225,6 +215,7 @@ def _run_single_task(task):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            timeout=TASK_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
             print(f"[WARN] failed for {func} ({binary_path}), exit={result.returncode}")
@@ -232,12 +223,12 @@ def _run_single_task(task):
                 print(result.stderr)
             return (func, binary_path, False)
 
-        # Optional: stdout silencing oder logging:
-        # if result.stdout:
-        #     print(result.stdout)
-
         print(f"[OK] {func} ({binary_path})")
         return (func, binary_path, True)
+    
+    except subprocess.TimeoutExpired:
+        print(f"[TIMEOUT] {func} ({binary_path}) exceeded timeout of {TASK_TIMEOUT_SECONDS} seconds")
+        return (func, binary_path, False)
 
     except Exception as exc:
         print(f"[EXCEPTION] {func} ({binary_path}): {exc}")
@@ -256,7 +247,7 @@ def _run_binary_task(task):
     cmd = [
         "python3",
         script_path,
-        "--mode", "train",
+        "--mode", "test",
         "--batch",
         "--worklist", worklist_path,
         "--UseContext", "true",
@@ -273,6 +264,7 @@ def _run_binary_task(task):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            timeout=TASK_TIMEOUT_SECONDS, 
         )
         if result.returncode != 0:
             print(f"[WARN] batch failed for worklist={worklist_path}, exit={result.returncode}")
@@ -282,6 +274,10 @@ def _run_binary_task(task):
 
         print(f"[OK] batch for worklist={worklist_path}")
         return (worklist_path, True)
+    
+    except subprocess.TimeoutExpired:
+        print(f"[TIMEOUT] batch for worklist={worklist_path} exceeded timeout of {TASK_TIMEOUT_SECONDS} seconds")
+        return (worklist_path, False)
 
     except Exception as exc:
         print(f"[EXCEPTION] batch for worklist={worklist_path}: {exc}")
@@ -303,7 +299,6 @@ def main():
 
     script_path = os.path.join(os.path.dirname(__file__), "AsmToInput.py")
 
-    # Anzahl Worker: entweder aus ENV oder alle Cores
     try:
         env_workers = int(os.environ.get("CREATE_TRAIN_WORKERS", "0"))
     except ValueError:
@@ -334,8 +329,6 @@ def main():
 
         worklist_path = _make_worklist_for_binary(binary_path, functions)
         tasks.append((script_path, worklist_path, source_path))
-        # for func in functions:
-        #     tasks.append((script_path, binary_path, source_path, func))
 
     if not tasks:
         print("[INFO] No functions found for training data generation.")
@@ -345,12 +338,9 @@ def main():
     print(f"[INFO] Prepared {len(tasks)} tasks")
     print(f"[INFO] Using {num_workers} parallel workers\n")
 
-    # Multiprocessing-Pool starten
     with mp.Pool(processes=num_workers) as pool:
-        # results = pool.map(_run_single_task, tasks)
         results = pool.map(_run_binary_task, tasks)
 
-    # Zusammenfassung
     print("\n================ SUMMARY ================")
     ok_count = 0
     fail_count = 0

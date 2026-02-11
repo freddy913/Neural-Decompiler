@@ -27,6 +27,8 @@ def build_addr2line_resolver(binary_path):
                 errors="ignore"
             ).strip()
             # possible output : "src/foo.c:137"
+            if not out or out.startswith("??"):
+                out = None
         except Exception:
             out = None
 

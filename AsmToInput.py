@@ -46,7 +46,7 @@ INPUT_DIR = os.path.join(".", "INPUT")
 FUNCTION_TXT_PATH = os.path.join(INPUT_DIR, FUNCTION_TXT)
 ASSEMBLY_TXT_PATH = os.path.join(INPUT_DIR, ASSEMBLY_TXT)
 PAIR_JSONL_PATH = None
-CHUNK_STATE_ROOT = os.path.join(".", "CHUNK_STATE")
+MARKER_BUFFER_TOKENS = 128
 
 class MockProject:
     def __init__(self, binary_path):
@@ -76,6 +76,7 @@ def compute_context_budget(target_token_count):
     else:
         return 6500
 
+# TODO: not used?
 def get_token_length_of_entry(entry, tokenizer):
     if "token_count" in entry and entry["token_count"] is not None:
         return entry["token_count"]
@@ -102,132 +103,29 @@ def _binary_slug_from_path(binary_path: str) -> str:
 
     return last_component or "sample"
 
-
-def _ensure_pair_jsonl_path() -> str:
+def _ensure_pair_jsonl_path(binary_path: str, function_name: str) -> str:
     """Resolve and cache the JSONL path for the current binary/function."""
-    global PAIR_JSONL_PATH
-    if PAIR_JSONL_PATH:
-        return PAIR_JSONL_PATH
+    # global PAIR_JSONL_PATH
+    # if PAIR_JSONL_PATH:
+    #     return PAIR_JSONL_PATH
 
-    slug = _binary_slug_from_path(TARGET_BINARY_PATH)
-    function_name = TARGET_FUNCTION_NAME or "target"
-    random_suffix = random.randint(0, 99)
-    filename = f"{slug}_{function_name}_{random_suffix}.jsonl"
+    slug = _binary_slug_from_path(binary_path)
+    function_slug = function_name or "target"
+    random_suffix = random.randint(0, 999)
+    filename = f"{slug}_{function_slug}_{random_suffix}.jsonl"
     PAIR_JSONL_PATH = os.path.join(INPUT_DIR, filename)
     return PAIR_JSONL_PATH
 
-
-
-def _chunk_slug(value):
-    if not value:
-        return "target"
-    return re.sub(r"[^0-9A-Za-z_]+", "_", value)
-
-def persist_chunk_state(sample):
-    chunk_plan = sample.get("chunk_plan") or []
-    if not chunk_plan:
-        return None
-
-    target_slug = _chunk_slug(sample.get("target_function_name"))
-    binary_path = sample.get("binary_path")
-    try:
-        rel_bin = os.path.relpath(binary_path) if binary_path else None
-    except Exception:
-        rel_bin = binary_path
-    binary_slug = _chunk_slug(rel_bin) if rel_bin else "binary"
-    slug = f"{target_slug}__{binary_slug}"
-    state_dir = os.path.join(CHUNK_STATE_ROOT, slug)
-    os.makedirs(state_dir, exist_ok=True)
-
-    state_payload = {
-        "binary_path": sample.get("binary_path"),
-        "target_function": sample.get("target_function_name"),
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "chunk_strategy": sample.get("chunk_strategy"),
-        "slug": slug,
-        "expected_output_files": [f"{entry.get('name')}.c" for entry in chunk_plan],
-        "chunks": [
-            {
-                "index": entry.get("index"),
-                "name": entry.get("name"),
-                "token_count": entry.get("token_count"),
-                "assembly_file": f"{entry.get('name')}_assembly.txt",
-            }
-            for entry in chunk_plan
-        ],
-    }
-
-    state_path = os.path.join(state_dir, "chunk_state.json")
-    with open(state_path, "w", encoding="utf-8") as f:
-        json.dump(state_payload, f, indent=2)
-
-    for entry in chunk_plan:
-        assembly_path = os.path.join(state_dir, f"{entry['name']}_assembly.txt")
-        with open(assembly_path, "w", encoding="utf-8") as af:
-            af.write(entry["assembly"])
-
-    return state_path
-
-def combine_chunk_outputs(chunk_plan, outputs_dir, target_name, binary_path=None, output_dir=None):
-    if not chunk_plan or not outputs_dir:
-        return None
-
-    if not os.path.isdir(outputs_dir):
-        if WRITE_DEBUG_FILES: print(f"[WARN] Chunk output directory '{outputs_dir}' does not exist.")
-        return None
-
-    target_slug = _chunk_slug(target_name)
-    try:
-        rel_bin = os.path.relpath(binary_path) if binary_path else None
-    except Exception:
-        rel_bin = binary_path
-    binary_slug = _chunk_slug(rel_bin) if rel_bin else None
-    slug = f"{target_slug}__{binary_slug}" if binary_slug else target_slug
-
-    if output_dir is None:
-        output_dir = outputs_dir
-    os.makedirs(output_dir, exist_ok=True)
-
-    combined_parts = []
-    missing = []
-
-    for entry in chunk_plan:
-        expected_file = f"{entry['name']}.c"
-        chunk_path = os.path.join(outputs_dir, expected_file)
-        if not os.path.exists(chunk_path):
-            missing.append(expected_file)
-            continue
-        with open(chunk_path, "r", encoding="utf-8", errors="ignore") as cf:
-            combined_parts.append(cf.read().strip())
-
-    if not combined_parts:
-        if WRITE_DEBUG_FILES: print("[WARN] No chunk outputs were found to combine.")
-        if missing:
-            if WRITE_DEBUG_FILES: print(f"[WARN] Missing chunk outputs: {', '.join(missing)}")
-        return None
-
-    combined_path = os.path.join(output_dir, f"{slug}_combined.c")
-    with open(combined_path, "w", encoding="utf-8") as out_f:
-        out_f.write("\n\n".join(part for part in combined_parts if part))
-
-    if missing:
-        if WRITE_DEBUG_FILES: print(f"[WARN] Missing chunk outputs: {', '.join(missing)}")
-
-    return combined_path
-
-def build_prompt_and_write_debug(
+def write_debug_artifacts(
     target_func_data,
     context_funcs,
-    header_block,
-    write_debug_files=WRITE_DEBUG_FILES,
+    header_block
 ):
     """
-    Builds the final input string for the model and writes debug files if specified.
-    (Context Functions + <TARGET_SEP> + Target Function)
+    Writes debug files to disk so humans can inspect the context selection.
+    Does NOT affect the actual model input anymore.
     """
-
     context_funcs = context_funcs or []
-
     target_name = target_func_data.get('name') 
     target_segment = target_func_data.get('assembly', '').strip()
     
@@ -237,85 +135,61 @@ def build_prompt_and_write_debug(
     for entry in context_funcs:
         role = entry.get('role', 'context')
         name = entry.get('name') or 'unknown_function'
-
+        
         if entry.get('append_mode') == 'c_approx' and entry.get('c_approx'):
             code = entry.get('c_approx') or ""
         else:
             code = entry.get('assembly') or ""
 
-        if not code:
-            continue
+        if not code: continue
 
         block_tuple = (name, code.strip())  
         if role == 'caller':
             callers_block.append(block_tuple)
-        elif role == 'callee':
-            callees_block.append(block_tuple)
         else:
             callees_block.append(block_tuple)
-
-    #TODO: remove as items already deduped earlier
-    # def dedup(blocks):
-    #     seen = set()
-    #     out = []
-    #     for nm, cd in blocks:
-    #         if nm in seen:
-    #             continue
-    #         seen.add(nm)
-    #         out.append((nm, cd))
-    #     return out
-
-    # callers_block = dedup(callers_block)
-    # callees_block = dedup(callees_block)
-
+            
     parts = []
-
+    
     if header_block:
+        parts.append("--- HEADER BLOCK ---")
         parts.append(header_block.rstrip())
 
-    # Target first
-    if write_debug_files:
-        parts.append(f"Target: {target_name}\n{target_segment}")
-    else:
-        parts.append(f"Target: {target_segment}")
+    parts.append(f"\n--- TARGET FUNCTION: {target_name} ---")
+    parts.append(target_segment)
 
-    # Callers (BY)
     if callers_block:
-        parts.append("BY")
+        parts.append(f"\n--- CALLERS ({len(callers_block)}) ---")
         for nm, cd in callers_block:
-            if write_debug_files:
-                parts.append(f"Caller: {nm}\n{cd}")
-            else:
-                parts.append(f"Caller: {cd}")
+            parts.append(f"// Function: {nm}\n{cd}")
 
-    # Callees (TO)
     if callees_block:
-        parts.append("TO")
+        parts.append(f"\n--- CALLEES ({len(callees_block)}) ---")
         for nm, cd in callees_block:
-            if write_debug_files:
-                parts.append(f"Callee: {nm}\n{cd}")
-            else:
-                parts.append(f"Callee: {cd}")
+            parts.append(f"// Function: {nm}\n{cd}")
 
-    prompt = "\n\n".join(parts) + "\n"
+    human_readable_prompt = "\n".join(parts) + "\n"
 
-    if write_debug_files:
-        with open("selected_context_functions.txt", "w", encoding="utf-8") as f:
-            for entry in context_funcs or []:
+    try:
+        os.makedirs("DEBUG", exist_ok=True)
+        with open("DEBUG/selected_context_functions.txt", "w", encoding="utf-8") as f:
+            for entry in context_funcs:
                 name = entry.get('name', 'unknown_function')
                 degree = entry.get('degree', 'n/a')
                 role = entry.get('role', 'context')
                 mode = entry.get('append_mode', 'assembly')
-                f.write(f"Function: {name} (degree {degree}, role {role}, mode {mode})\n")
+                score = entry.get('score', 0)
+                f.write(f"Function: {name:<30} | Role: {role:<8} | Deg: {degree} | Score: {score} | Mode: {mode}\n")
             f.write("\n")
 
-        with open("final_model_input.txt", "w", encoding="utf-8") as f:
-            f.write(prompt)
+        with open("DEBUG/final_model_input.txt", "w", encoding="utf-8") as f:
+            f.write(human_readable_prompt)
 
-        with open("target_assembly.txt", "w", encoding="utf-8") as f:
+        with open("DEBUG/target_assembly.txt", "w", encoding="utf-8") as f:
             f.write(target_segment)
-
-    return prompt
+            
+    except Exception as e:
+        print(f"[WARN] write debug files failed: {e}")
 
 def _one_line(s): 
     if not s: return ""
@@ -339,16 +213,16 @@ def init_pair_files():
     global PAIR_JSONL_PATH
     PAIR_JSONL_PATH = None
 
-def _append_pair_jsonl(asm_payload: str, lbl_payload: str):
+def _append_pair_jsonl(asm_payload: str, lbl_payload: str, jsonl_path: str):
     """Append the provided pair as a JSONL entry."""
     payload = {"input": asm_payload, "output": lbl_payload}
-    jsonl_path = _ensure_pair_jsonl_path()
+    #jsonl_path = _ensure_pair_jsonl_path()
     os.makedirs(os.path.dirname(jsonl_path), exist_ok=True)
     with open(jsonl_path, "a", encoding="utf-8") as pf:
         json.dump(payload, pf)
         pf.write("\n")
 
-def append_pair(model_input, label_c_code):
+def append_pair(model_input, label_c_code, jsonl_path=None):
     asm  = _one_line(model_input)
     lbl_full = (label_c_code or "").strip()
     lbl_preview = _compact_label(label_c_code)
@@ -366,7 +240,9 @@ def append_pair(model_input, label_c_code):
         ff.flush()
         os.fsync(ff.fileno())
 
-    _append_pair_jsonl(asm, lbl_full)
+    if jsonl_path is None:
+        jsonl_path = _ensure_pair_jsonl_path()
+    _append_pair_jsonl(asm, lbl_full, jsonl_path=jsonl_path)
 
     if VERBOSE: print(f"[OK {time.strftime('%H:%M:%S')}] wrote pair: asm={len(asm)} chars, lbl={len(lbl_full)} chars")
     if lbl_preview and lbl_preview != lbl_full:
@@ -374,215 +250,155 @@ def append_pair(model_input, label_c_code):
     sys.stdout.flush()
     return True
 
-
-
-def build_sample(mode="train", UseContext="false", source_hint=None, dwarf_lookup=None):
+def _generate_input_from_binary(binary_path, function_name, UseContext="true"):
     """
-    mode:
-    'train' - build sample for training (with early exit if no C code)
-    'test' - build test sample for inference
+    This function is the deterministic core of the pipeline.
+    It takes a binary path and function name and ALWAYS produces the same input string.
+    No 'mode', no label lookup.
     """
-    if not os.path.isfile(TARGET_BINARY_PATH):
-        if WRITE_DEBUG_FILES: print(f"[ERR] Binary '{TARGET_BINARY_PATH}' not found.")
-        return
-
-    # ==============================================================================
-    # SUPER EARLY EXIT (Vor angr): Prüfen, ob wir überhaupt C-Code haben
-    # ==============================================================================
-    if mode == "train":
-        # 1. DWARF Lookup laden (das geht schnell via pyelftools)
-        dwarf_ref = dwarf_lookup
-        if dwarf_ref is None:
-            dwarf_ref = build_dwarf_lookup_for_repo(os.path.dirname(TARGET_BINARY_PATH))
-        
-        # 2. Mock-Objekte erstellen, um get_real_c_code zu täuschen
-        mock_proj = MockProject(TARGET_BINARY_PATH)
-        mock_func = MockFunction(TARGET_FUNCTION_NAME)
-        
-        # 3. C-Code suchen (rein über Filesystem / DWARF, ohne angr)
-        check_src = get_real_c_code(
-            mock_func,
-            mock_proj,
-            purpose="target",
-            source_hint=source_hint,
-            dwarf_lookup=dwarf_ref
-        )
-        
-        # 4. Validierung des gefundenen Codes
-        valid_c = False
-        if check_src:
-            body = check_src.strip()
-            # Der Check aus HintsAndLabels: Muss Klammern haben und lang genug sein
-            if "{" in body and "}" in body and len(body) > 20:
-                valid_c = True
-        
-        if not valid_c:
-            if VERBOSE: 
-                print(f"[FAST-SKIP] No valid C source for '{TARGET_FUNCTION_NAME}' found. Skipping angr load.")
-            return None
-    # ==============================================================================
-
-    project, cfg = load_project(TARGET_BINARY_PATH)
-
-    if project is None or cfg is None:
-        if WRITE_DEBUG_FILES: print("Failed to load the binary project or CFG.")
-        return
-
-    addr2line = build_addr2line_resolver(TARGET_BINARY_PATH)
-
-    target_func = next(cfg.functions.get_by_name(TARGET_FUNCTION_NAME), None)
-
-    if target_func is None:
-        if WRITE_DEBUG_FILES: print(f"Function '{TARGET_FUNCTION_NAME}' not found in CFG.")
-        return
     
-    if not is_relevant_user_like_function(target_func):
-        if WRITE_DEBUG_FILES:
-            print(f"[SKIP] Target function '{TARGET_FUNCTION_NAME}' classified as non-user / runtime / allocator.")
+    project, cfg = load_project(binary_path)
+    if not project or not cfg:
+        print(f"[WARN] Angr fails at {binary_path}")
         return None
 
-    target_src_loc = addr2line(target_func.addr) if target_func else None
+    target_func = next(cfg.functions.get_by_name(function_name), None)
+    if not target_func or not is_relevant_user_like_function(target_func):
+        return None
 
     target_func_data = get_function_data(target_func, project, MYTOKENIZER)
-    
-    if target_func_data.get("token_count", 0) > CONTEXT_THRESHOLD_TOKENS:
-        if WRITE_DEBUG_FILES: print(f"[WARN] Target function token count {target_func_data.get('token_count')} exceeds context threshold. Skipping.")
-        return
-    
-    header_block = build_header_block_from_binary(TARGET_BINARY_PATH)
-    if header_block:
-        header_tokens = len(MYTOKENIZER(header_block, truncation=False)["input_ids"])
-    else:
-        header_tokens = 0
-
     target_tokens = target_func_data.get("token_count", 0)
+    if target_tokens > CONTEXT_THRESHOLD_TOKENS:
+        return None
+
+    header_block = build_header_block_from_binary(binary_path)
+    header_tokens = len(MYTOKENIZER(header_block, truncation=False)["input_ids"]) if header_block else 0
     
-    # Budget calculation inline
-    if target_tokens <= 128: context_budget_raw = 1000
-    elif target_tokens <= 256: context_budget_raw = 1500
-    elif target_tokens <= 512: context_budget_raw = 2500
-    elif target_tokens <= 1024: context_budget_raw = 3500
-    elif target_tokens <= 2000: context_budget_raw = 5000
-    else: context_budget_raw = 6500
-
-    MARKER_BUFFER_TOKENS = 128
+    context_budget_raw = compute_context_budget(target_tokens)
     max_budget = CONTEXT_THRESHOLD_TOKENS - target_tokens - header_tokens - MARKER_BUFFER_TOKENS
-    max_budget = max(0, max_budget)
-    context_budget = min(context_budget_raw, max_budget)
+    context_budget = max(0, min(context_budget_raw, max_budget))
 
-    TARGET_FUNC_ADDR = target_func.addr
-    all_functions_map = {func.addr: func for func in cfg.functions.values()}
-    if VERBOSE: print(f"\n--- Target function identified: '{TARGET_FUNCTION_NAME}' at {hex(target_func.addr)} ---")
-
-    # DWARF Ref holen (falls wir im Test-Mode sind oder es oben noch nicht geholt haben)
-    dwarf_ref = dwarf_lookup
-    if mode == "train" and dwarf_ref is None:
-        dwarf_ref = build_dwarf_lookup_for_repo(os.path.dirname(TARGET_BINARY_PATH))
-
+    context_funcs = []
     if UseContext == "true":
+        all_functions_map = {func.addr: func for func in cfg.functions.values()}
         context_funcs_raw = get_context_candidates_with_degrees(target_func, cfg)
-        caller_degrees = context_funcs_raw['callers']
-        callee_degrees = context_funcs_raw['callees']
-
-        context_candidates = (
-            [(func, degree, 'caller') for func, degree in caller_degrees.items()] +
-            [(func, degree, 'callee') for func, degree in callee_degrees.items()]
-        )
         
-        seen_addresses = set()
-        deduped_candidates = []
-        for func, degree, role in context_candidates:
-            if func.addr not in seen_addresses:
-                deduped_candidates.append((func, degree, role))
-                seen_addresses.add(func.addr)
-
-        candidate_funcs_filtered = filter_candidate_funcs_runtime_safe(deduped_candidates, target_func)
+        context_candidates = []
+        for func, degree in context_funcs_raw['callers'].items(): context_candidates.append((func, degree, 'caller'))
+        for func, degree in context_funcs_raw['callees'].items(): context_candidates.append((func, degree, 'callee'))
         
-        candidate_func_data = build_candidate_func_data(candidate_funcs_filtered, project, cfg, MYTOKENIZER)
-
-        for entry in candidate_func_data["all_functions"]:
-            fobj = entry["function_obj"]
-            entry["src_loc"] = addr2line(fobj.addr)
-            
+        seen = set(); deduped = []
+        for f,d,r in context_candidates:
+            if f.addr not in seen: deduped.append((f,d,r)); seen.add(f.addr)
+        
+        filtered = filter_candidate_funcs_runtime_safe(deduped, target_func)
+        candidate_data = build_candidate_func_data(filtered, project, cfg, MYTOKENIZER)
+        
         context_funcs = apply_heuristic(
-            target_func_data,
-            candidate_func_data,
-            context_budget,
-            cfg.functions.callgraph,
-            all_functions_map,
-            TARGET_FUNC_ADDR,
-            project,
-            mode,
-            dwarf_lookup=dwarf_ref,
-            target_src_loc=target_src_loc,
-            assembly_only=USE_ASSEMBLY_ONLY,
+            target_func_data, candidate_data, context_budget,
+            cfg.functions.callgraph, all_functions_map, target_func.addr,
+            project, mode="test", assembly_only=True
         ) or []
-    else:
-        context_funcs = []
 
-    model_input_str = build_prompt_and_write_debug(
-        target_func_data,
-        context_funcs,
-        header_block=header_block,
-        write_debug_files=WRITE_DEBUG_FILES,
-    )
+    callers_asm = []
+    callees_asm = []
+    
+    for entry in context_funcs:
+        role = entry.get('role', 'context')
+        if entry.get('append_mode') == 'c_approx' and entry.get('c_approx'):
+            code = entry.get('c_approx') or ""
+        else:
+            code = entry.get('assembly') or ""
+            
+        if not code.strip(): continue
+        
+        if role == 'caller':
+            callers_asm.append(code)
+        else: 
+            callees_asm.append(code)
+
+    if WRITE_DEBUG_FILES:
+        write_debug_artifacts(target_func_data, context_funcs, header_block)
 
     const_pool_target = collect_constant_pool_for_function(target_func, project)
-
+    
     formatted_input = normalize_model_input_with_context_groups(
-        raw_text=model_input_str,
+        target_asm=target_func_data.get('assembly', ''),
+        caller_list=callers_asm,
+        callee_list=callees_asm,
+        header=header_block,
         project=project,
         target_func_obj=target_func,
         const_pool_for_target=const_pool_target
     )
+    
+    return formatted_input
+
+
+def build_sample(binary_path: str, function_name: str, mode="train", UseContext="true", source_hint=None, dwarf_lookup=None):
+    """
+    Wrapper around the core function that handles mode (train/test).
+    """
+
+    if mode == "train":
+        dwarf_ref = dwarf_lookup or build_dwarf_lookup_for_repo(os.path.dirname(binary_path))
+        mock_proj = MockProject(binary_path)
+        mock_func = MockFunction(function_name)
+        
+        check_src = get_real_c_code(
+            mock_func, mock_proj, purpose="target", source_hint=source_hint, dwarf_lookup=dwarf_ref
+        )
+        
+        if not check_src or "{" not in check_src.strip():
+            if VERBOSE: print(f"[FAST-SKIP] No valid C source for '{function_name}'.")
+            return None
+
+    project, _ = load_project(binary_path)
+    if not project:
+        print(f"[WARN] Angr-Fehler bei {binary_path} (früher Check)")
+        return None
+        
+    target_func = next(project.kb.functions.get_by_name(function_name), None)
+    if not target_func:
+        print(f"[WARN] Funktion {function_name} nicht gefunden.")
+        return None
+
+    const_pool_target = collect_constant_pool_for_function(target_func, project)
+
+    model_input = _generate_input_from_binary(binary_path, function_name, UseContext)
+    
+    if not model_input:
+        return None 
 
     sample = {
-        "binary_path": TARGET_BINARY_PATH,
-        "target_function_name": TARGET_FUNCTION_NAME,
-        "model_input": formatted_input,
+        "binary_path": binary_path,
+        "target_function_name": function_name,
+        "model_input": model_input,
+        "context_role": mode,
+        "constant_pool": const_pool_target
     }
 
     if mode == "train":
-        # Wir können hier check_src von oben wiederverwenden, wenn es gesetzt ist!
-        # Falls nicht (z.B. im Test Mode), holen wir es neu.
-        real_src = locals().get('check_src', None) 
-        if real_src is None:
-             real_src = get_real_c_code(
-                target_func,
-                project,
-                purpose="target",
-                source_hint=source_hint,
-                dwarf_lookup=dwarf_ref,
-            )
-
         formatted_output = finalize_label_for_training(
-            getattr(target_func, "name", None),
-            real_src,
-            const_pool_target,
-            dwarf_ref
+            function_name, check_src, const_pool_target, dwarf_ref
         )
-
-        if formatted_output is None:
-            # Sollte durch Early Exit nicht mehr passieren, aber sicher ist sicher
-            if VERBOSE: print("[SKIP] Final label validation failed (late check).")
+        
+        if not formatted_output:
+            if VERBOSE: print("[SKIP] Final label validation failed.")
             return None
-
+            
         sample["label_c_code"] = formatted_output
-        sample["context_role"] = "train"
-
-    elif mode == "test":
-        sample["context_role"] = "test"
 
     return sample
 
-def _set_target_config(binary_path, function_name):
-    Config.TARGET_BINARY_PATH = binary_path
-    Config.TARGET_FUNCTION_NAME = function_name
+# def _set_target_config(binary_path, function_name):
+#     Config.TARGET_BINARY_PATH = binary_path
+#     Config.TARGET_FUNCTION_NAME = function_name
 
-    global TARGET_BINARY_PATH, TARGET_FUNCTION_NAME, PAIR_JSONL_PATH
-    TARGET_BINARY_PATH = binary_path
-    TARGET_FUNCTION_NAME = function_name
-    PAIR_JSONL_PATH = None
+#     global TARGET_BINARY_PATH, TARGET_FUNCTION_NAME, PAIR_JSONL_PATH
+#     TARGET_BINARY_PATH = binary_path
+#     TARGET_FUNCTION_NAME = function_name
+#     PAIR_JSONL_PATH = None
 
 def _iter_compiled_binaries(compiled_root):
     if not os.path.isdir(compiled_root):
@@ -598,7 +414,6 @@ def _iter_compiled_binaries(compiled_root):
             for fname in sorted(files):
                 if re.match(r"^executable\d+$", fname):
                     yield repo_name, os.path.join(root, fname)
-            # executables are expected directly under repo subdirectories; no need to walk deeper
             break
 
 def main():
@@ -606,7 +421,7 @@ def main():
     parser.add_argument(
         "--mode",
         choices=["train", "test"],
-        default="train",
+        default="test",
         help="Mode: train for dataset generation, test for analysis",
     )
     parser.add_argument(
@@ -633,35 +448,24 @@ def main():
         help="Process all binaries inside the COMPILED directory (train mode recommended)",
     )
     parser.add_argument(
-        "--chunk-output-dir",
-        type=str,
-        default=None,
-        help="Optional directory containing per-chunk C outputs to merge after inference.",
-    )
-
-    parser.add_argument(
         "--UseContext",
         choices=["true", "false"],
         default="true",
         help="Use Context: 'true' for adding context to the input string, 'false' for only the target as input"
     )
-
     parser.add_argument(
         "--worklist",
         type=str,
         default=None,
         help="Optional TSV file: each line 'ABS_BINARY_PATH<TAB>FUNCTION_NAME'"
     )
-
     args = parser.parse_args()
 
     mode = args.mode
     UseContext = args.UseContext
     source_hint_arg = args.source_path
 
-    # ========= NEU: batch + worklist =========
     if args.batch and args.worklist:
-        # wir verarbeiten DEINE liste, nicht den festen COMPILED/ baum
         if mode == "train":
             init_pair_files()
 
@@ -678,9 +482,10 @@ def main():
             func_name = parts[1] if len(parts) > 1 and parts[1] else args.function_name
 
             if VERBOSE: print(f"\n=== [{processed}] Processing {bin_path} :: {func_name} ===")
+            #set config globally
+            #_set_target_config(bin_path, func_name)
             try:
-                _set_target_config(bin_path, func_name)
-                result = build_sample(mode=mode, UseContext=UseContext, source_hint=source_hint_arg)
+                result = build_sample(binary_path=bin_path, function_name= func_name, mode=mode, UseContext=UseContext, source_hint=source_hint_arg)
             except Exception as exc:
                 if WRITE_DEBUG_FILES: print(f"[WARN] Failed to process '{bin_path}' / '{func_name}': {exc}")
                 continue
@@ -688,19 +493,35 @@ def main():
             if result is None:
                 if WRITE_DEBUG_FILES: print(f"[WARN] build_sample returned no result.")
                 continue
+            
+            const_pool = result.get("constant_pool")
+            jsonl_path = _ensure_pair_jsonl_path(bin_path, func_name)
+
+            if const_pool:
+                mapping = {}
+                for info in const_pool.values():
+                    placeholder, text = info.get("placeholder"), info.get("text")
+                    if placeholder and text and placeholder.startswith(("STR", "FMT", "CMD")):
+                        mapping[placeholder] = json.dumps(text)
+
+                if mapping:
+                    map_path = jsonl_path.replace(".jsonl", ".map.json")
+                    os.makedirs(os.path.dirname(map_path), exist_ok=True)
+                    with open(map_path, "w") as f:
+                        json.dump(mapping, f, indent=2)
 
             if mode == "train":
                 label = result.get("label_c_code")
                 if not label:
                     if WRITE_DEBUG_FILES: print(f"[WARN] no label generated; skipping pair write.")
                     continue
-                append_pair(model_input=result["model_input"], label_c_code=label)
+
+                append_pair(model_input=result["model_input"], label_c_code=label, jsonl_path=jsonl_path)
 
             successes += 1
 
         if VERBOSE: print(f"\nBatch (worklist) complete. Succeeded: {successes}/{processed}")
         return
-    # ========= ENDE NEU =========
 
     if args.batch:
         compiled_root = os.path.join(os.path.dirname(__file__), "COMPILED")
@@ -714,9 +535,9 @@ def main():
         for repo_name, binary_path in _iter_compiled_binaries(compiled_root):
             processed += 1
             if VERBOSE: print(f"\n=== [{processed}] Processing {repo_name}: {binary_path} ===")
+            #_set_target_config(binary_path, args.function_name)
             try:
-                _set_target_config(binary_path, args.function_name)
-                result = build_sample(mode=mode, UseContext=UseContext, source_hint=source_hint_arg)
+                result = build_sample(binary_path=bin_path, function_name= func_name, mode=mode, UseContext=UseContext, source_hint=source_hint_arg)
             except Exception as exc:
                 if WRITE_DEBUG_FILES: print(f"[WARN] Failed to process '{binary_path}': {exc}")
                 continue
@@ -725,54 +546,61 @@ def main():
                 if WRITE_DEBUG_FILES: print(f"[WARN] Skipping '{binary_path}': build_sample returned no result.")
                 continue
 
-            chunk_state_path = None
-            chunk_plan = result.get("chunk_plan")
-            if chunk_plan:
-                chunk_state_path = persist_chunk_state(result)
-                if chunk_state_path:
-                    if VERBOSE: print(f"[Chunk] State saved to {chunk_state_path}")
-                expected_files = ", ".join(f"{entry['name']}.c" for entry in chunk_plan)
-                if expected_files:
-                    if VERBOSE: print(f"[Chunk] Expected output files: {expected_files}")
-                if args.chunk_output_dir:
-                    combined_path = combine_chunk_outputs(
-                        chunk_plan,
-                        args.chunk_output_dir,
-                        result.get("target_function_name"),
-                        binary_path=result.get("binary_path"),
-                        output_dir=args.chunk_output_dir,
-                    )
-                    if combined_path:
-                        if VERBOSE: print(f"[Chunk] Combined output saved to {combined_path}")
+            const_pool = result.get("constant_pool")
+            jsonl_path = _ensure_pair_jsonl_path(bin_path, func_name)
 
+            if const_pool:
+                mapping = {}
+                for info in const_pool.values():
+                    placeholder, text = info.get("placeholder"), info.get("text")
+                    if placeholder and text and placeholder.startswith(("STR", "FMT", "CMD")):
+                        mapping[placeholder] = json.dumps(text)
+
+                if mapping:
+                    map_path = jsonl_path.replace(".jsonl", ".map.json")
+                    os.makedirs(os.path.dirname(map_path), exist_ok=True)
+                    with open(map_path, "w") as f:
+                        json.dump(mapping, f, indent=2)
+            
             if mode == "train":
                 label = result.get('label_c_code')
                 if not label:
                     if WRITE_DEBUG_FILES: print(f"[WARN] Skipping '{binary_path}': no label generated in train mode.")
                     continue
-                append_pair(model_input=result['model_input'], label_c_code=label)
+                append_pair(model_input=result['model_input'], label_c_code=label, jsonl_path=jsonl_path)
                 successes += 1
             else:
                 if VERBOSE:
-                    print(f"ContextRole: {result['context_role']}")
                     print(f"Target function: {result['target_function_name']}")
                     print(f"Model input:\n{result['model_input']}")
                 successes += 1
 
-        if VERBOSE: print(f"\nBatch processing complete. Succeeded: {successes}/{processed}")
+        if VERBOSE: print(f"\nBatch processing compl ete. Succeeded: {successes}/{processed}")
         return
 
-    _set_target_config(args.binary_path, args.function_name)
-
-    result = build_sample(mode=mode, UseContext=UseContext, source_hint=source_hint_arg)
+    #_set_target_config(args.binary_path, args.function_name)
+    bin_path = TARGET_BINARY_PATH
+    func_name = TARGET_FUNCTION_NAME
+    result = build_sample(binary_path=bin_path, function_name= func_name, mode=mode, UseContext=UseContext, source_hint=source_hint_arg)
 
     if result is None:
         return
 
-    chunk_plan = result.get("chunk_plan")
-    chunk_state_path = None
-    if chunk_plan:
-        chunk_state_path = persist_chunk_state(result)
+    const_pool = result.get("constant_pool")
+    jsonl_path = _ensure_pair_jsonl_path(bin_path, func_name)
+
+    if const_pool:
+        mapping = {}
+        for info in const_pool.values():
+            placeholder, text = info.get("placeholder"), info.get("text")
+            if placeholder and text and placeholder.startswith(("STR", "FMT", "CMD")):
+                mapping[placeholder] = json.dumps(text)
+
+        if mapping:
+            map_path = jsonl_path.replace(".jsonl", ".map.json")
+            os.makedirs(os.path.dirname(map_path), exist_ok=True)
+            with open(map_path, "w") as f:
+                json.dump(mapping, f, indent=2)
 
     if mode == "train":
         init_pair_files()
@@ -781,38 +609,18 @@ def main():
             if WRITE_DEBUG_FILES: print("[WARN] No label generated in train mode; skipping pair write.")
             return
 
-        append_pair(model_input=result['model_input'], label_c_code=label)
+        append_pair(model_input=result['model_input'], label_c_code=label, jsonl_path=jsonl_path)
 
         if VERBOSE:
             print("\n--- Final Transformer Input ---")
-            print(f"ContextRole: {result['context_role']}")
             print(f"Target function: {result['target_function_name']}")
             print(f"Input tokens preview:\n{result['model_input']}")
             print(f"\nLabel preview:\n{label}")
     else:
         if VERBOSE:
             print("\n--- Test Mode Output ---")
-            print(f"ContextRole: {result['context_role']}")
             print(f"Target function: {result['target_function_name']}")
             print(f"Model input:\n{result['model_input']}")
-
-    if chunk_plan:
-        print("\n--- Chunk Plan ---")
-        for entry in chunk_plan:
-            print(f"Part {entry['index']}: {entry['token_count']} tokens -> {entry['name']}")
-        if chunk_state_path:
-            print(f"Chunk state saved to: {chunk_state_path}")
-        if args.chunk_output_dir:
-            combined_path = combine_chunk_outputs(
-                chunk_plan,
-                args.chunk_output_dir,
-                result.get("target_function_name"),
-                binary_path=result.get("binary_path"),
-            )
-            if combined_path:
-                print(f"Combined chunk output written to: {combined_path}")
-        expected_files = ", ".join(f"{entry['name']}.c" for entry in chunk_plan)
-        print(f"Expected chunk output files (for AI results): {expected_files}")
 
 if __name__ == "__main__":
     main()

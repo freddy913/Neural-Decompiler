@@ -1,3 +1,23 @@
-angr==9.2.181
-transformers==4.57.1
-tqdm==4.67.1
+# Hugging Face ecosystem
+transformers
+accelerate
+datasets
+sentencepiece
+
+# PyTorch 
+torch
+torchvision
+torchaudio
+
+# DeepSpeed for ZeRO-3
+deepspeed
+
+# Binary Analysis
+angr
+pyelftools
+capstone
+unicorn
+
+# Utilities
+tqdm
+matplotlib

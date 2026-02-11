@@ -1,7 +1,3 @@
-'''
- Assembly preprocessing (model input normalizer)
-'''
-
 import os
 import re
 import weakref
@@ -17,7 +13,6 @@ STREAM_STDOUT = "STREAM_STDOUT"
 STREAM_UNKNOWN = "STREAM_UNKNOWN"
 _STREAM_TOKENS = {STREAM_STDERR, STREAM_STDOUT}
 
-# Matches STRx..., FMTx..., CMDx..., DATx...
 _PLACEHOLDER_RE = re.compile(r'\b(?:STR|FMT|CMD|DAT)x[0-9a-fA-F]+\b')
 _RIP_REL_OPERAND_RE = re.compile(r'\[rip\s*(?P<sign>[+-])\s*0x(?P<hex>[0-9a-fA-F]+)\]', re.IGNORECASE)
 _PTR_TO_PLACEHOLDER_RE = re.compile(
@@ -28,7 +23,6 @@ _PTR_TO_PLACEHOLDER_RE = re.compile(
     r')',
     re.IGNORECASE
 )
-_SECTION_SPLIT_RE = re.compile(r'\s+(TARGET:|BY|TO|Caller:|Callee:)', re.IGNORECASE)
 _RET_RE = _re_end.compile(r'^\s*ret\s*;?\s*$', re.IGNORECASE)
 _CALL_RESOLVE_RADIUS = 48
 _CALL_SYMBOL_CACHE: dict[int, tuple[weakref.ReferenceType, dict[int, str], list[int]]] = {}
@@ -37,7 +31,6 @@ def _dbg(msg: str) -> None:
     if _LABEL_DEBUG:
         print(f"[LABEL_DEBUG] {msg}")
 
-# --- SYMBOL RESOLUTION HELPERS ---
 
 def _normalize_symbol_generic(sym: str | None) -> str:
     if not sym: return ""
@@ -128,11 +121,10 @@ def _resolve_call_symbol(project, abs_or_text: str) -> str | None:
     scan(idx, 1)
 
     if best_sym:
-        mapping.setdefault(addr, best_sym) # Cache result
+        mapping.setdefault(addr, best_sym)
         return best_sym
     return None
 
-# --- TEXT PROCESSING HELPERS ---
 
 def _tighten_commas_semicolons(s: str) -> str:
     s = re.sub(r'\s*,\s*', ',', s)
@@ -148,18 +140,22 @@ def join_semicolon(seq: list[str]) -> str:
     return "; ".join(seq)
 
 def _drop_block_lines(s: str) -> bool:
-    return "Block @" in s or re.match(r'^\s*;;;?\s*Block\s*@', s, re.IGNORECASE)
+    if "Block @" in s or re.match(r'^\s*;;;?\s*Block\s*@', s, re.IGNORECASE):
+        return True
+    
+    if s.strip().endswith(":"):
+        return True
+        
+    return False
+
 
 def _tokenize_model_input(raw_text: str) -> list[str]:
+    """
+    Splits the assembly block into lines.
+    Since we now pass distinct blocks, we don't need to split by keywords anymore.
+    """
     if not raw_text: return []
-    # Split bei bekannten Headern oder Adressen, um Zeilen wiederherzustellen
-    tokenized = re.sub(
-        r'(?=(HEADERS:|#include|Target:|Caller:|Callee:|BY\b|TO\b|;;;?\s*Block\s*@|^\s*0x[0-9a-fA-F]+:))',
-        '\n',
-        raw_text,
-        flags=re.MULTILINE | re.IGNORECASE
-    )
-    return [ln.strip() for ln in tokenized.splitlines() if ln.strip()]
+    return [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
 
 def _const_pool_lookup_maps(const_pool: dict | None):
     if not const_pool: return {}, {}
@@ -185,8 +181,6 @@ def _const_pool_lookup_maps(const_pool: dict | None):
     const_pool["__lookup_cache__"] = {"disp_map": disp_map, "tail_map": tail_map}
     return disp_map, tail_map
 
-# --- ASM REWRITING HELPERS ---
-
 def _replace_rip_rel_with_pool(line: str, const_pool: dict) -> str:
     if not const_pool: return line
     disp_map, tail_map = _const_pool_lookup_maps(const_pool)
@@ -203,7 +197,6 @@ def _replace_rip_rel_with_pool(line: str, const_pool: dict) -> str:
         return match.group(0).replace(" ", "")
 
     line = _RIP_REL_OPERAND_RE.sub(_sub, line)
-    # Entferne 'qword ptr' vor PLACEHOLDER (z.B. "mov rdi, qword ptr STRx..." -> "mov rdi, STRx...")
     return _PTR_TO_PLACEHOLDER_RE.sub(r'\1', line)
 
 def _rewrite_calls(line: str, project) -> str:
@@ -217,59 +210,6 @@ def _rewrite_calls(line: str, project) -> str:
         return "call <FUNC>"
     return re.sub(r'\bcall\s+0x[0-9a-fA-F]+', _sub, line)
 
-def _rewrite_branches_to_labels(lines: list[str]) -> list[str]:
-    # 1. Ziele sammeln
-    targets = []
-    pat = re.compile(r'\b(?:j[a-z]{1,3}|jmp)\s+(0x[0-9a-fA-F]+)', re.IGNORECASE)
-    for s in lines:
-        m = pat.search(s)
-        if m: targets.append(m.group(1))
-    
-    targets = sorted(list(set(targets))) # Sortiert für deterministische @jmp0, @jmp1...
-    addr_to_label = {addr: f"@jmp{i}" for i, addr in enumerate(targets)}
-
-    out = []
-    # 2. Ersetzen und Label einfügen
-    for s in lines:
-        # Sprungziel ersetzen: jmp 0x123 -> jmp @jmp0
-        def _repl(m):
-            return f"{m.group(0).split()[0]} {addr_to_label.get(m.group(1), m.group(1))}"
-        
-        s_rewritten = pat.sub(_repl, s)
-        
-        # Check ob diese Zeile ein Ziel ist (Adresse am Anfang oder im String?)
-        # Da wir Adressen schon gestrippt haben (_strip_addr_prefix), ist das schwer exakt.
-        # Wir nutzen eine Heuristik oder den ursprünglichen Match im Raw-Text.
-        # HIER vereinfacht: Wir können labels nicht perfekt setzen ohne die Original-Adressen der Zeilen.
-        # Aber wir können schauen, ob wir das Label noch anhängen müssen?
-        # Akins Ansatz war: Das Label steht am Ende. Wir wollen es am Anfang.
-        # Da wir die Adressen der Zeilen hier nicht mehr haben (wurden gestrippt), 
-        # ist die exakte Platzierung schwierig. 
-        # Workaround: Wir verlassen uns darauf, dass `_rewrite_branches_to_labels` in Akins Logik 
-        # die Adressen noch greifen konnte ODER wir akzeptieren, dass wir nur Jumps umschreiben.
-        
-        # HIER KORRIGIERT: Wir fügen das Label einfach ein, wenn die Zeile "markiert" wurde.
-        # Da wir die Adressen verloren haben, können wir Labels nur setzen, wenn sie im Input noch da waren.
-        # ABER: Deine vorherige Implementierung hatte eine Logik. Ich baue sie nach:
-        
-        # ACHTUNG: Ohne die Adressen `0x...:` am Zeilenanfang können wir nicht wissen, wo @jmp0 hin muss.
-        # `_strip_addr_prefix` läuft VORHER. Das ist ein Problem in der Pipeline-Reihenfolge.
-        # Wir lassen die Labels hier weg, wenn wir sie nicht sicher zuordnen können,
-        # ODER wir verlassen uns auf existierende Marker.
-        # Da dein Output schon @jmp0 enthielt, scheint deine Pipeline Adressen intern zu handeln.
-        
-        # Ich nutze hier deine Regex-Logik, aber korrigiere die Position:
-        pending_label = None
-        # Suche nach Label im Text (falls vorher schon annotiert wurde?) -> Nein.
-        
-        # Wir nehmen an, der Input hat noch Adressen oder wir können sie nicht rekonstruieren.
-        # Falls wir keine Adressen haben, schreiben wir nur die Jumps um.
-        out.append(s_rewritten)
-
-    # Korrektur: Die Labels müssten eigentlich basierend auf den Adressen VOR _strip_addr_prefix eingefügt werden.
-    # Da das hier zu komplex wird, behalten wir die reine Umschreibung der Sprünge bei.
-    return out
-
 def _looks_like_new_prologue(line: str) -> bool:
     s = line.strip().lower()
     return s.startswith("endbr64") or s.startswith("push rbp")
@@ -280,7 +220,6 @@ def _cut_after_function_end(seq: list[str]) -> list[str]:
     for line in seq:
         if saw_ret:
             if _looks_like_new_prologue(line): break
-            # Allow nops/int3 padding
             if not re.match(r'^(nop|int3|ud2|align)', line.strip().lower()):
                 break
         out.append(line)
@@ -289,7 +228,7 @@ def _cut_after_function_end(seq: list[str]) -> list[str]:
 
 def _ensure_prologue_first(seq: list[str]) -> list[str]:
     """
-    Stellt sicher, dass 'endbr64' (falls vorhanden) am Anfang steht.
+    Ensures that 'endbr64' (if present) is at the beginning.
     """
     for idx, line in enumerate(seq):
         if line.strip().lower().startswith("endbr64"):
@@ -299,127 +238,112 @@ def _ensure_prologue_first(seq: list[str]) -> list[str]:
 
 def _normalize_operands(line: str) -> str:
     """
-    Bereinigt Operanden: hex lowercase, ptr weg, spaces weg.
+    Removes 'ptr' keywords and normalizes hex numbers to lowercase.
     """
-    # Hex lowercase: 0X1A -> 0x1a
     line = re.sub(r'0X[0-9A-F]+', lambda m: m.group(0).lower(), line)
     
-    # Pointer sizes weg
     line = line.replace("qword ptr", "").replace("dword ptr", "")
     line = line.replace("byte ptr", "").replace("word ptr", "")
     line = line.replace("xmmword ptr", "")
     
-    # Spaces bereinigen
     line = re.sub(r'\s*,\s*', ',', line)
     line = re.sub(r'\s+', ' ', line)
     return line.strip()
 
 
-# --- MAIN FUNCTION ---
-
+# main function
 def normalize_model_input_with_context_groups(
-    raw_text: str,
+    target_asm: str,
+    caller_list: list[str],
+    callee_list: list[str],
+    header: str,
     project,
     target_func_obj,
     const_pool_for_target: dict
 ) -> str:
-    lines = _tokenize_model_input(raw_text)
-
-    includes = []
-    groups = [] # List of (section_name, [lines])
-    cur = []
-    section = None
-
-    # 1. Parsing
-    for s in lines:
-        s_lower = s.lower()
-        s_upper = s.upper()
-
-        # Header detection
-        if s_lower.startswith("headers:"): continue
-        if s_lower.startswith("#include"):
-            if s.strip() != "#include": includes.append(s)
-            continue
+    
+    def _process_one_asm_block(raw_asm):
+        if not raw_asm: return ""
+        lines = _tokenize_model_input(raw_asm)
         
-        # Section detection
-        if s_lower.startswith("target:"):
-            if cur and section:
-                groups.append((section, cur))
-                cur = []
-            section = 'target'
-            content = s[7:].strip()
-            if content: cur.append(content)
-            continue
+        cleaned_lines = []
+        for s in lines:
+            if _drop_block_lines(s): continue
+            cleaned_lines.append(s)
             
-        if s_upper == "BY":
-            if cur and section:
-                groups.append((section, cur))
-                cur = []
-            section = 'caller'
-            continue
+        if not cleaned_lines: return ""
+
+        addr_to_label = {}
+        jump_targets = set()
+        
+        line_addr_map = []
+        
+        for s in cleaned_lines:
+            m_addr = re.match(r'^\s*(0x[0-9a-fA-F]+):', s)
+            current_addr = None
+            if m_addr:
+                current_addr = int(m_addr.group(1), 16)
             
-        if s_upper == "TO":
-            if cur and section:
-                groups.append((section, cur))
-                cur = []
-            section = 'callee'
-            continue
+            line_addr_map.append((current_addr, s))
             
-        # Ignore old labels
-        if s_lower.startswith("caller:") or s_lower.startswith("callee:"): continue
+            m_jmp = re.search(r'\b(?:j[a-z]{1,3}|jmp|call)\s+(0x[0-9a-fA-F]+)', s, re.IGNORECASE)
+            if m_jmp:
+                target = int(m_jmp.group(1), 16)
+                jump_targets.add(target)
 
-        # Filter blocks
-        if _drop_block_lines(s): continue
+        sorted_targets = sorted(list(jump_targets))
+        for i, addr in enumerate(sorted_targets):
+            addr_to_label[addr] = f"@jmp{i}"
 
-        # New function start detection within context
-        if section in {'caller', 'callee'} and cur and _looks_like_new_prologue(s):
-            groups.append((section, cur))
-            cur = []
+        final_lines = []
+        
+        for addr, line in line_addr_map:
+            if addr in addr_to_label:
+                label = addr_to_label[addr]
+                pass 
 
-        # Strip address
-        s = _strip_addr_prefix(s)
-        if not s: continue
+            s = _replace_rip_rel_with_pool(line, const_pool_for_target)
+            s = _rewrite_calls(s, project)
 
-        # Apply features
-        s = _replace_rip_rel_with_pool(s, const_pool_for_target)
-        s = _rewrite_calls(s, project)
+            def _repl_jmp(m):
+                val = int(m.group(1), 16)
+                if val in addr_to_label:
+                    return f"{m.group(0).split()[0]} {addr_to_label[val]}"
+                return m.group(0)
+            s = re.sub(r'\b(?:j[a-z]{1,3}|jmp)\s+(0x[0-9a-fA-F]+)', _repl_jmp, s)
 
-        cur.append(s)
+            s = _strip_addr_prefix(s)
+            
+            if addr in addr_to_label:
+                s = f"{addr_to_label[addr]}; {s}"
 
-    if cur and section:
-        groups.append((section, cur))
+            final_lines.append(s)
 
-    # 2. Processing & Formatting
-    def _process_asm_lines(seq: list[str]) -> str:
-        if not seq: return ""
-        # IMPORTANT: Order matters
-        seq = _ensure_prologue_first(seq)
-        seq = _rewrite_branches_to_labels(seq)
+        seq = _ensure_prologue_first(final_lines)
         seq = _cut_after_function_end(seq)
         seq = [_normalize_operands(x) for x in seq]
         return _tighten_commas_semicolons(join_semicolon(seq))
 
-    target_str = ""
-    callers_list = []
-    callees_list = []
+    target_str = _process_one_asm_block(target_asm)
 
-    for name, seq in groups:
-        clean_asm = _process_asm_lines(seq)
-        if not clean_asm: continue
+    final_callers = []
+    for c_asm in caller_list:
+        norm = _process_one_asm_block(c_asm)
+        if norm:
+            final_callers.append(f"FN{{{norm}}}")
 
-        if name == "target":
-            target_str += (" " + clean_asm) if target_str else clean_asm
-        elif name == "caller":
-            callers_list.append(f"FN{{{clean_asm}}}")
-        elif name == "callee":
-            callees_list.append(f"FN{{{clean_asm}}}")
+    final_callees = []
+    for c_asm in callee_list:
+        norm = _process_one_asm_block(c_asm)
+        if norm:
+            final_callees.append(f"FN{{{norm}}}")
 
-    # 3. Final Assembly
-    final_header = " ".join(sorted(list(set(includes))))
+    final_header = ""
+    if header and "HEADERS:" in header:
+        final_header = header.replace("HEADERS:", "").strip().replace("\n", " ")
     
-    # Auto-headers if empty
     if not final_header:
-        full_text = target_str + " ".join(callers_list) + " ".join(callees_list)
+        full_text = target_str + " ".join(final_callers) + " ".join(final_callees)
         needed = set()
         if "printf" in full_text or "puts" in full_text: needed.add("#include <stdio.h>")
         if "malloc" in full_text or "free" in full_text: needed.add("#include <stdlib.h>")
@@ -429,7 +353,7 @@ def normalize_model_input_with_context_groups(
 
     return (
         f"HEADER:{final_header} "
-        f"TARGET:{target_str} "
-        f"CALLERS:{fmt_list(callers_list)} "
-        f"CALLEES:{fmt_list(callees_list)}"
+        f"TARGET:func;{target_str} "
+        f"CALLERS:{fmt_list(final_callers)} "
+        f"CALLEES:{fmt_list(final_callees)}"
     ).strip()

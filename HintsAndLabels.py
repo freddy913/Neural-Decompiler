@@ -12,7 +12,6 @@ This part is only used during training, when .o files still contain DWARF.
 At inference we will NOT have DWARF, so these helpers are not called.
 '''
 
-
 def resolve_type_name(die, cu, dwarfinfo, depth=0):
     '''
     Reconstruct a human-readable C type name from a DWARF DIE.
@@ -294,7 +293,6 @@ We also normalize stdout/stderr to STREAM_STDOUT / STREAM_STDERR so the model le
 a stable representation independent of FILE* specifics.
 '''
 
-
 def _similar(a, b):
     return difflib.SequenceMatcher(None, a, b).ratio()
 
@@ -354,13 +352,7 @@ def annotate_real_c_body_with_placeholders(real_src, const_pool):
     return annotated
 
 '''
-SECTION 4: Final label assembly.
-This is what you feed as "label_c_code" during training:
-   <DWARF signature if available>
-   <annotated ground truth body with STRx... etc.>
-
-At inference the model won't see DWARF or real_src,
-but it has learned to output that style.
+assembly labeling helpers
 '''
 def strip_c_comments(code: str) -> str:
     """
