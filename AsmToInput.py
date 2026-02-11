@@ -40,7 +40,6 @@ from ElfFeatures import (
 
 from AsmNormalizer import join_semicolon, normalize_model_input_with_context_groups
 
-from AddrMap import build_addr2line_resolver
 
 INPUT_DIR = os.path.join(".", "INPUT")
 FUNCTION_TXT_PATH = os.path.join(INPUT_DIR, FUNCTION_TXT)
