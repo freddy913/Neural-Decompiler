@@ -43,6 +43,12 @@ _LIBC_ALIAS_MAP = {k.lower(): v for k, v in _LIBC_ALIAS_MAP_RAW.items()}
 
 
 def _normalize_symbol_generic(sym: str | None) -> str:
+    """
+    Normalizes library symbol names by removing version suffixes and aliases.
+    Args:
+        :param sym: Symbol name string or None.
+        :return: Normalized symbol name as string.
+    """
     if not sym:
         return ""
     base = sym.strip()
@@ -60,9 +66,10 @@ _PROJECT_CACHE: dict[str, tuple[Optional[angr.Project], object]] = {}
 
 def load_project(binary_path):
     """
-    takes a path to a binary and loads an angr project
-    returns the loaded angr.project object and the cfg-object
-    failures have to be handled as file not found or invalid binary
+    Loads an angr project and CFG with caching for performance.
+    Args:
+        :param binary_path: Absolute path to binary file.
+        :return: Tuple of (project, cfg) or (None, None) on failure.
     """
 
     abs_path = os.path.abspath(binary_path)
@@ -95,21 +102,12 @@ def load_project(binary_path):
     _PROJECT_CACHE[abs_path] = (project, cfg)
     return project, cfg
 
-def get_all_functions(cfg):
-    """
-    takes a cfg-object
-    returns a list of all function objects in the program
-    """
-    functions = set()
-    for func in cfg.functions.values():
-        functions.add(func)
-
-    return list(functions)
-
 def get_function_assembly(func):
     """
-    takes an angr function object
-    returns the assembly code of the function as a string
+    Extracts assembly code from an angr function object.
+    Args:
+        :param func: Angr function object.
+        :return: Multi-line assembly string.
     """
     if func is None:
         return ""
@@ -137,7 +135,11 @@ def get_function_assembly(func):
 
 def get_token_count(assembly_code, tokenizer=MYTOKENIZER):
     """
-    tokenizes the assembly code and returns the token count
+    Tokenizes assembly code and returns token count.
+    Args:
+        :param assembly_code: Assembly code string.
+        :param tokenizer: Huggingface tokenizer instance.
+        :return: Integer token count.
     """
     try:
         token_ids = tokenizer(assembly_code, add_special_tokens=False).input_ids
@@ -148,8 +150,12 @@ def get_token_count(assembly_code, tokenizer=MYTOKENIZER):
 
 def get_function_data(func, project, tokenizer):
     """
-    builds a compact dict with relevant data about the function
-        { 'name': str, 'assembly': str, 'token_count': int }
+    Builds compact dictionary with function metadata including token count.
+    Args:
+        :param func: Angr function object.
+        :param project: Angr project object.
+        :param tokenizer: Huggingface tokenizer instance.
+        :return: Dictionary with name, assembly, and token_count keys.
     """
     if func is None:
         return {'name': None, 'assembly': '', 'token_count': 0}
@@ -169,9 +175,12 @@ def get_function_data(func, project, tokenizer):
 
 # Constant pool extraction.
 def _is_printable_ascii(buf_bytes):
-    '''
-    Heuristic: buffer is considered "text-like" if >=70% of bytes are printable ASCII.
-    '''
+    """
+    Heuristic to determine if byte buffer is printable ASCII text.
+    Args:
+        :param buf_bytes: Byte buffer.
+        :return: True if >=70% bytes are printable as boolean.
+    """
     printable = set(bytes(string.printable, "ascii"))
     score = sum((b in printable and b not in b"\x0b\x0c") for b in buf_bytes)
     return (len(buf_bytes) > 0) and (score / len(buf_bytes) >= 0.7)
@@ -182,12 +191,12 @@ _FORMAT_SPECIFIER_RE = re.compile(
 )
 
 def _classify_blob(text_str):
-    '''
-    Decide placeholder kind for a string:
-      CMD -> likely shell/command payload (iptables, chmod, etc.)
-      FMT -> looks like printf-style format string ("%s", "%d", ...)
-      STR -> normal human-readable message/log/error
-    '''
+    """
+    Classifies string literal as CMD, FMT, or STR based on content heuristics.
+    Args:
+        :param text_str: Text string to classify.
+        :return: Classification string: CMD, FMT, or STR.
+    """
     lowered = text_str.lower()
 
     shell_keywords = [
@@ -203,16 +212,22 @@ def _classify_blob(text_str):
     return "STR"
 
 def make_placeholder(kind_prefix, addr_int):
-    '''
-    Build "STRx4019e7" / "CMDx402abc" / "FMTx403def" / "DATx404000"
-    from the kind and absolute address.
-    '''
+    """
+    Builds placeholder token from kind and address.
+    Args:
+        :param kind_prefix: Prefix string like STR, CMD, FMT, or DAT.
+        :param addr_int: Integer address.
+        :return: Placeholder string like STRx4019e7.
+    """
     hexaddr = format(addr_int, "x")
     return f"{kind_prefix}x{hexaddr}"
 
 def _stream_symbol_addrs(project) -> dict[str, int]:
     """
-    Determine rebased addresses for stdout/stderr using the project loader.
+    Determines rebased addresses for stdout and stderr symbols.
+    Args:
+        :param project: Angr project object.
+        :return: Dictionary mapping symbol names to addresses.
     """
     out: dict[str, int] = {}
     loader = getattr(project, "loader", None)
@@ -254,7 +269,10 @@ def _stream_symbol_addrs(project) -> dict[str, int]:
 
 def _function_symbol_addrs(project) -> dict[int, str]:
     """
-    Build mapping from GOT/PLT addresses to imported function names.
+    Builds mapping from GOT and PLT addresses to imported function names.
+    Args:
+        :param project: Angr project object.
+        :return: Dictionary mapping addresses to symbol names.
     """
     out: dict[int, str] = {}
     loader = getattr(project, "loader", None)
@@ -299,10 +317,14 @@ def _function_symbol_addrs(project) -> dict[int, str]:
     return out
 
 def read_zero_terminated(project, start_addr, maxlen=4096):
-    '''
-    Read bytes starting at 'start_addr' from the loaded binary in angr
-    until we hit a 0x00 byte or maxlen or memory read fails.
-    '''
+    """
+    Reads zero-terminated byte sequence from binary memory at address.
+    Args:
+        :param project: Angr project object.
+        :param start_addr: Starting address to read from.
+        :param maxlen: Maximum bytes to read.
+        :return: Bytes object terminated at null byte.
+    """
     out = bytearray()
     for i in range(maxlen):
         try:
@@ -317,28 +339,13 @@ def read_zero_terminated(project, start_addr, maxlen=4096):
         out.append(b)
     return bytes(out)
 
-def _rip_relative_target(insn, opnd):
-    '''
-    Compute absolute address for RIP-relative memory operand.
-    insn.address      : start address of instruction
-    insn.size         : size in bytes of instruction
-    opnd.mem.disp     : displacement (int)
-    effective = insn.address + insn.size + disp
-    '''
-    disp = opnd.mem.disp
-    return insn.address + insn.size + disp
-
 def _get_capstone_insn(insn):
-    '''
-    angr basic block instructions can be:
-      - real capstone CsInsn
-      - a wrapper with .insn holding CsInsn
-      - sometimes .capstone or .capstone.insn etc.
-
-    We try a few common layouts and return the real CsInsn
-    (the one that actually has .operands, .address, .size).
-    '''
-    # case 1: insn is already CsInsn-like
+    """
+    Extracts real Capstone instruction object from angr wrapper layers.
+    Args:
+        :param insn: Angr instruction wrapper or Capstone instruction.
+        :return: Capstone CsInsn object or None.
+    """
     if hasattr(insn, "operands") and hasattr(insn, "address") and hasattr(insn, "size"):
         return insn
 
@@ -359,16 +366,12 @@ def _get_capstone_insn(insn):
     return None
 
 def try_extract_rodata_addr_from_insn(insn):
-    '''
-    Return metadata about a constant (string, fmt, cmd, data)
-    referenced by this instruction, or None.
-
-    The returned dict contains:
-      {
-        "address": <absolute int address>,
-        "rip_disp": <disp used in RIP-relative operand or None>,
-      }
-    '''
+    """
+    Extracts constant address referenced by instruction operands.
+    Args:
+        :param insn: Angr instruction object.
+        :return: Dictionary with address and rip_disp or None.
+    """
     cs_insn = _get_capstone_insn(insn)
     if cs_insn is None:
         return None
@@ -411,25 +414,13 @@ def try_extract_rodata_addr_from_insn(insn):
     return None
 
 def collect_constant_pool_for_function(func_obj, project):
-    '''
-    Iterate all machine instructions in func_obj.
-    For each instruction, try to find referenced constant addresses
-    (typical for strings / format strings / shell commands in .rodata).
-
-    For each found address:
-      1. Read NUL-terminated bytes at that address
-      2. If printable, classify as CMD / FMT / STR
-      3. Otherwise classify as DAT
-      4. Build placeholder token, e.g. STRx401abc
-
-    Returns:
-      { "0x401abc": { "bytes": b"...",
-                      "text": "Not enough privileges...",
-                      "kind": "STR",
-                      "placeholder": "STRx401abc" },
-        ...
-      }
-    '''
+    """
+    Iterates function instructions to extract rodata constant references with classification.
+    Args:
+        :param func_obj: Angr function object.
+        :param project: Angr project object.
+        :return: Dictionary mapping addresses to constant metadata.
+    """
     streams = _stream_symbol_addrs(project)
     func_symbols = _function_symbol_addrs(project)
     seen: dict[int, dict] = {}

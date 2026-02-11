@@ -33,11 +33,24 @@ def _dbg(msg: str) -> None:
 
 
 def _normalize_symbol_generic(sym: str | None) -> str:
+    """
+    Normalizes symbol names by removing version suffixes and @ decorators.
+    Args:
+        :param sym: Symbol name string or None.
+        :return: Normalized symbol name as a string.
+    """
     if not sym: return ""
     base = sym.strip().split('@@')[0].split('@')[0]
     return base
 
 def _store_call_symbol_map(project, mapping: dict[int, str]) -> None:
+    """
+    Stores a call symbol mapping in cache using weak references.
+    Args:
+        :param project: Angr project object to associate with mapping.
+        :param mapping: Dictionary mapping addresses to symbol names.
+        :return: None.
+    """
     try:
         ref = weakref.ref(project)
     except TypeError:
@@ -45,6 +58,12 @@ def _store_call_symbol_map(project, mapping: dict[int, str]) -> None:
     _CALL_SYMBOL_CACHE[id(project)] = (ref, mapping, sorted(mapping.keys()))
 
 def _get_call_symbol_map(project) -> tuple[dict[int, str], list[int]]:
+    """
+    Retrieves or builds call symbol mapping for a project with caching.
+    Args:
+        :param project: Angr project object.
+        :return: Tuple of (mapping dict, sorted address list).
+    """
     pid = id(project)
     entry = _CALL_SYMBOL_CACHE.get(pid)
     if entry:
@@ -57,6 +76,12 @@ def _get_call_symbol_map(project) -> tuple[dict[int, str], list[int]]:
     return mapping, sorted_addrs
 
 def _build_call_symbol_map(project) -> dict[int, str]:
+    """
+    Builds a mapping from call addresses to function symbols from PLT and imports.
+    Args:
+        :param project: Angr project object.
+        :return: Dictionary mapping addresses to symbol names.
+    """
     mapping: dict[int, str] = {}
     loader = getattr(project, "loader", None)
     if loader is None:
@@ -91,6 +116,13 @@ def _build_call_symbol_map(project) -> dict[int, str]:
     return mapping
 
 def _resolve_call_symbol(project, abs_or_text: str) -> str | None:
+    """
+    Resolves a call instruction target address to its symbol name.
+    Args:
+        :param project: Angr project object.
+        :param abs_or_text: Assembly text containing a hex address.
+        :return: Symbol name as string, or None if not found.
+    """
     try:
         m = re.search(r'0x[0-9a-fA-F]+', abs_or_text)
         if not m: return None
@@ -127,19 +159,43 @@ def _resolve_call_symbol(project, abs_or_text: str) -> str | None:
 
 
 def _tighten_commas_semicolons(s: str) -> str:
+    """
+    Removes whitespace around commas and semicolons.
+    Args:
+        :param s: Input string.
+        :return: Tightened string.
+    """
     s = re.sub(r'\s*,\s*', ',', s)
     s = re.sub(r'\s*;\s*', ';', s)
     return s
 
 def _strip_addr_prefix(s: str) -> str:
+    """
+    Strips address prefix from assembly line.
+    Args:
+        :param s: Assembly line with optional address prefix.
+        :return: Line without address prefix.
+    """
     return re.sub(r'^\s*0x[0-9a-fA-F]+:\s*', '', s).strip()
 
 def join_semicolon(seq: list[str]) -> str:
+    """
+    Joins assembly lines with semicolon delimiters.
+    Args:
+        :param seq: List of assembly instruction strings.
+        :return: Joined string with semicolons.
+    """
     seq = [x.strip() for x in seq if x.strip()]
     if not seq: return ""
     return "; ".join(seq)
 
 def _drop_block_lines(s: str) -> bool:
+    """
+    Determines if an assembly line should be dropped from output.
+    Args:
+        :param s: Assembly line string.
+        :return: True if line should be dropped, False otherwise.
+    """
     if "Block @" in s or re.match(r'^\s*;;;?\s*Block\s*@', s, re.IGNORECASE):
         return True
     
@@ -151,15 +207,22 @@ def _drop_block_lines(s: str) -> bool:
 
 def _tokenize_model_input(raw_text: str) -> list[str]:
     """
-    Splits the assembly block into lines.
-    Since we now pass distinct blocks, we don't need to split by keywords anymore.
+    Splits assembly text into individual line tokens.
+    Args:
+        :param raw_text: Raw assembly text block.
+        :return: List of non-empty stripped lines.
     """
     if not raw_text: return []
     return [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
 
 def _const_pool_lookup_maps(const_pool: dict | None):
+    """
+    Creates lookup maps for constant pool placeholders with caching.
+    Args:
+        :param const_pool: Constant pool dictionary.
+        :return: Tuple of (displacement map, tail map) dictionaries.
+    """
     if not const_pool: return {}, {}
-    # Simple caching inside dict
     if "__lookup_cache__" in const_pool:
         return const_pool["__lookup_cache__"]["disp_map"], const_pool["__lookup_cache__"]["tail_map"]
 
@@ -182,6 +245,13 @@ def _const_pool_lookup_maps(const_pool: dict | None):
     return disp_map, tail_map
 
 def _replace_rip_rel_with_pool(line: str, const_pool: dict) -> str:
+    """
+    Replaces RIP-relative memory operands with constant pool placeholders.
+    Args:
+        :param line: Assembly instruction line.
+        :param const_pool: Constant pool dictionary.
+        :return: Line with placeholders substituted.
+    """
     if not const_pool: return line
     disp_map, tail_map = _const_pool_lookup_maps(const_pool)
 
@@ -200,6 +270,13 @@ def _replace_rip_rel_with_pool(line: str, const_pool: dict) -> str:
     return _PTR_TO_PLACEHOLDER_RE.sub(r'\1', line)
 
 def _rewrite_calls(line: str, project) -> str:
+    """
+    Rewrites call instructions to use resolved symbol names with @plt suffix.
+    Args:
+        :param line: Assembly instruction line.
+        :param project: Angr project object.
+        :return: Rewritten line with symbolic call targets.
+    """
     def _sub(mm):
         sym = _resolve_call_symbol(project, mm.group(0))
         
@@ -211,10 +288,22 @@ def _rewrite_calls(line: str, project) -> str:
     return re.sub(r'\bcall\s+0x[0-9a-fA-F]+', _sub, line)
 
 def _looks_like_new_prologue(line: str) -> bool:
+    """
+    Checks if line appears to be start of a new function prologue.
+    Args:
+        :param line: Assembly instruction line.
+        :return: True if line looks like a prologue, False otherwise.
+    """
     s = line.strip().lower()
     return s.startswith("endbr64") or s.startswith("push rbp")
 
 def _cut_after_function_end(seq: list[str]) -> list[str]:
+    """
+    Truncates instruction sequence after function return and trailing NOPs.
+    Args:
+        :param seq: List of assembly instruction strings.
+        :return: Truncated list ending at function boundary.
+    """
     out = []
     saw_ret = False
     for line in seq:
@@ -228,7 +317,10 @@ def _cut_after_function_end(seq: list[str]) -> list[str]:
 
 def _ensure_prologue_first(seq: list[str]) -> list[str]:
     """
-    Ensures that 'endbr64' (if present) is at the beginning.
+    Moves endbr64 instruction to first position if present.
+    Args:
+        :param seq: List of assembly instruction strings.
+        :return: Reordered list with prologue first.
     """
     for idx, line in enumerate(seq):
         if line.strip().lower().startswith("endbr64"):
@@ -238,7 +330,10 @@ def _ensure_prologue_first(seq: list[str]) -> list[str]:
 
 def _normalize_operands(line: str) -> str:
     """
-    Removes 'ptr' keywords and normalizes hex numbers to lowercase.
+    Normalizes assembly operands by removing ptr keywords and lowercasing hex.
+    Args:
+        :param line: Assembly instruction line.
+        :return: Normalized line string.
     """
     line = re.sub(r'0X[0-9A-F]+', lambda m: m.group(0).lower(), line)
     
@@ -251,7 +346,6 @@ def _normalize_operands(line: str) -> str:
     return line.strip()
 
 
-# main function
 def normalize_model_input_with_context_groups(
     target_asm: str,
     caller_list: list[str],
@@ -261,6 +355,18 @@ def normalize_model_input_with_context_groups(
     target_func_obj,
     const_pool_for_target: dict
 ) -> str:
+    """
+    Normalizes and formats assembly with context into structured model input.
+    Args:
+        :param target_asm: Assembly code of the target function.
+        :param caller_list: List of caller function assembly strings.
+        :param callee_list: List of callee function assembly strings.
+        :param header: Header block with include directives.
+        :param project: Angr project object.
+        :param target_func_obj: Target function object.
+        :param const_pool_for_target: Constant pool for the target function.
+        :return: Formatted model input string.
+    """
     
     def _process_one_asm_block(raw_asm):
         if not raw_asm: return ""

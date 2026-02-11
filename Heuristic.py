@@ -11,7 +11,11 @@ from HintsAndLabels import pick_best_match
 
 def get_context_candidates(target_func, cfg):
     """
-    Retrieves direct neighbours in the call graph.
+    Retrieves direct caller and callee neighbors in the call graph.
+    Args:
+        :param target_func: Target angr function object.
+        :param cfg: Angr CFG object.
+        :return: Dictionary with callers and callees sets.
     """
     if not target_func:
         return {'callers': set(), 'callees': set()}
@@ -38,7 +42,12 @@ def get_context_candidates(target_func, cfg):
 
 def get_context_candidates_with_degrees(target_func, cfg, degrees=DEGREE):
     """
-    Retrieves neighbours in the call graph up to a certain degree.
+    Retrieves call graph neighbors up to specified degree with distance tracking.
+    Args:
+        :param target_func: Target angr function object.
+        :param cfg: Angr CFG object.
+        :param degrees: Maximum degree of separation.
+        :return: Dictionary with callers and callees mapping functions to degrees.
     """
     if not target_func or degrees < 1:
         return {'callers': {}, 'callees': {}}
@@ -93,9 +102,6 @@ def get_context_candidates_with_degrees(target_func, cfg, degrees=DEGREE):
 
 
 # Filtering and cleaning candidate functions
-def remove_junk_functions(funcs):
-    return [func for func in funcs if func[0].name not in JUNK_FUNCTIONS]
-
 def _is_trampoline_or_tiny(func_obj, max_blocks=2, max_insns=8):
     try:
         blocks = list(func_obj.blocks)
@@ -115,6 +121,13 @@ def _is_trampoline_or_tiny(func_obj, max_blocks=2, max_insns=8):
     return insn_count <= max_insns
 
 def is_relevant_user_like_function(func_obj, target_func_obj=None):
+    """
+    Filters out runtime stubs and internal functions to identify user code.
+    Args:
+        :param func_obj: Function object to check.
+        :param target_func_obj: Optional target function for special handling.
+        :return: True if function is user-relevant as boolean.
+    """
     if func_obj is None: return False
     name = getattr(func_obj, "name", "")
     if not name: return False
@@ -130,6 +143,13 @@ def is_relevant_user_like_function(func_obj, target_func_obj=None):
     return True
 
 def filter_candidate_funcs_runtime_safe(funcs, target_func_obj):
+    """
+    Filters candidate functions to keep only user-relevant code.
+    Args:
+        :param funcs: List of (func_obj, degree, role) tuples.
+        :param target_func_obj: Target function object.
+        :return: Filtered list of tuples.
+    """
     cleaned = []
     for func_obj, degree, role in funcs:
         if is_relevant_user_like_function(func_obj, target_func_obj=target_func_obj):
@@ -151,6 +171,15 @@ def extract_struct_fingerprint(assembly: str):
     return offs
 
 def build_candidate_func_data(candidate_funcs, project, cfg, tokenizer=MYTOKENIZER):
+    """
+    Builds enriched metadata for candidate context functions with scoring features.
+    Args:
+        :param candidate_funcs: List of (func, degree, role) tuples.
+        :param project: Angr project object.
+        :param cfg: Angr CFG object.
+        :param tokenizer: Huggingface tokenizer instance.
+        :return: Dictionary with function metadata and statistics.
+    """
     candidate_func_data = {
         'func_names': [],
         'all_functions': [],
@@ -243,6 +272,12 @@ def map_symbols_to_headers(symbols: set[str]) -> list[str]:
 _HEADER_CACHE: dict[str, str] = {}
 
 def build_header_block_from_binary(binary_path: str) -> str:
+    """
+    Builds C header include block from binary external symbols with caching.
+    Args:
+        :param binary_path: Absolute path to binary file.
+        :return: Header block string with include directives.
+    """
     abs_path = os.path.abspath(binary_path)
     cached = _HEADER_CACHE.get(abs_path)
     if cached is not None: return cached
@@ -447,9 +482,18 @@ def _is_small_leaf_wrapper(candidate_obj, cg, target_addr, max_blocks=30, max_in
     if block_count is None or insn_count is None: return False
     return block_count <= max_blocks and insn_count <= max_insns
 
-def _calculate_candidate_score(candidate, callgraph, all_program_funcs, target_addr, target_struct_fp=None, target_src_loc=None, target_lex_fp=None, target_api_sig=None):
+def _calculate_candidate_score(candidate, callgraph, all_program_funcs, target_addr, target_struct_fp=None, target_lex_fp=None, target_api_sig=None):
     """
-    Score a context candidate (higher = better).
+    Computes relevance score for context candidate using multiple heuristics.
+    Args:
+        :param candidate: Candidate function dictionary.
+        :param callgraph: Angr callgraph object.
+        :param all_program_funcs: Dictionary of all program functions.
+        :param target_addr: Target function address.
+        :param target_struct_fp: Target struct fingerprint set.
+        :param target_lex_fp: Target lexical fingerprint set.
+        :param target_api_sig: Target API signature set.
+        :return: Computed score as integer.
     """
     candidate["score"] = candidate.get("score", BASIC_SCORE)
 
@@ -515,13 +559,18 @@ def apply_heuristic(
     all_functions_map,
     target_addr,
     project,
-    mode="test",
-    assembly_only=True,
-    dwarf_lookup=None,
-    target_src_loc=None, 
 ):
     """
-    Selects context functions (Assembly only) based on Score and Budget.
+    Selects optimal context functions based on relevance scoring and token budget.
+    Args:
+        :param target_func_data: Target function metadata dictionary.
+        :param context_candidates_data: Candidate functions data dictionary.
+        :param budget: Token budget for context.
+        :param callgraph: Angr callgraph object.
+        :param all_functions_map: Dictionary of all program functions.
+        :param target_addr: Target function address.
+        :param project: Angr project object.
+        :return: List of selected context function dictionaries.
     """
     context_candidates_data = context_candidates_data or {}
     all_candidate_entries = context_candidates_data.get('all_functions', []) or []
@@ -541,7 +590,6 @@ def apply_heuristic(
             all_functions_map,
             target_addr,
             target_struct_fp=target_struct_fp,
-            target_src_loc=target_src_loc,
             target_lex_fp=target_lex_fp,
             target_api_sig=target_api_sig,
         )
@@ -713,10 +761,16 @@ def get_real_c_code(
     purpose="target",
     source_hint=None,
     dwarf_lookup=None,
-    max_recursive_depth=2,
 ):
     """
-    Resolve the most reliable C-source snippet for func_obj.
+    Resolves the most reliable C source snippet for function using multiple strategies.
+    Args:
+        :param func_obj: Function object with name attribute.
+        :param project: Angr project object.
+        :param purpose: String describing usage purpose.
+        :param source_hint: Optional path hint to source file.
+        :param dwarf_lookup: Optional DWARF lookup dictionary.
+        :return: C source code string or None.
     """
     func_name = getattr(func_obj, "name", None)
     if not func_name or func_name.startswith("__"): return None

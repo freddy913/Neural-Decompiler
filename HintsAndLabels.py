@@ -13,11 +13,15 @@ At inference we will NOT have DWARF, so these helpers are not called.
 '''
 
 def resolve_type_name(die, cu, dwarfinfo, depth=0):
-    '''
-    Reconstruct a human-readable C type name from a DWARF DIE.
-    This walks through pointers, qualifiers (const, volatile, ...), typedefs, etc.
-    depth is used to avoid infinite recursion.
-    '''
+    """
+    Recursively reconstructs human-readable C type name from DWARF DIE.
+    Args:
+        :param die: DWARF DIE object.
+        :param cu: Compilation unit.
+        :param dwarfinfo: DWARF info object.
+        :param depth: Recursion depth counter.
+        :return: Type name string.
+    """
     if die is None or depth > 10:
         return "UNKNOWN_TYPE"
 
@@ -198,20 +202,12 @@ def extract_functions_from_o(o_path):
 _DWARF_CACHE: dict[str, dict] = {}
 
 def build_dwarf_lookup_for_repo(compiled_dir_root):
-    '''
-    Traverse COMPILED/<repo>/..., gather DWARF info from all .o files,
-    and build a mapping:
-    dwarf_lookup[func_name] = [
-        {
-            "o_path": ".../foo.o",
-            "signature_hint": "int foo(int x);",
-            "die": ...,
-            "cu": ...,
-            "dwarf_info": ...
-        },
-        ...
-    ]
-    '''
+    """
+    Traverses compiled directory to build aggregated DWARF function and type lookup with caching.
+    Args:
+        :param compiled_dir_root: Root directory of compiled objects.
+        :return: Dictionary with functions and types mappings.
+    """
     compiled_dir_root = os.path.abspath(compiled_dir_root)
     cached = _DWARF_CACHE.get(compiled_dir_root)
     if cached is not None:
@@ -239,20 +235,6 @@ def build_dwarf_lookup_for_repo(compiled_dir_root):
     _DWARF_CACHE[compiled_dir_root] = dwarf_lookup
 
     return dwarf_lookup
-
-
-def build_signature_hint_from_lookup(func_name, dwarf_lookup):
-    '''
-    Look up a function name in the aggregated DWARF lookup.
-    Return one signature string if available, else None.
-    '''
-    if not dwarf_lookup:
-        return None
-    func_map = dwarf_lookup.get("functions", dwarf_lookup)
-    lst = func_map.get(func_name)
-    if not lst:
-        return None
-    return lst[0].get("signature_hint")
 
 
 def pick_best_match(candidates, target_binary_path):
@@ -297,6 +279,13 @@ def _similar(a, b):
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 def annotate_real_c_body_with_placeholders(real_src, const_pool):
+    """
+    Replaces string literals in C source with placeholder tokens for consistency.
+    Args:
+        :param real_src: Original C source code string.
+        :param const_pool: Constant pool dictionary with placeholder mappings.
+        :return: Annotated C code with placeholders.
+    """
     annotated = real_src
 
     print("\n[ANNOTATION_DEBUG] checking replacements:")
@@ -356,8 +345,10 @@ assembly labeling helpers
 '''
 def strip_c_comments(code: str) -> str:
     """
-    Removes //... and /*...*/ comments,
-    without breaking strings/chars.
+    Removes single-line and multi-line C comments without breaking string literals.
+    Args:
+        :param code: C source code string.
+        :return: Code with comments removed as string.
     """
     OUT, SLASH, LINE, BLOCK, STRING, CHAR, ESC = range(7)
     state = OUT
@@ -420,23 +411,18 @@ def strip_c_comments(code: str) -> str:
 
     return ''.join(out)
 
-def finalize_label_for_training(func_name, real_src, const_pool, dwarf_lookup):
-    '''
-    Build the final training label for one function.
-
-    Steps:
-    1. Annotate the real source with placeholders (STRx..., CMDx..., FMTx...)
-    2. Use the DWARF signature hint only if we have no source body
-
-    Returns:
-        final_label (str) or None
-    '''
+def finalize_label_for_training(real_src, const_pool):
+    """
+    Builds final training label by annotating source and stripping comments.
+    Args:
+        :param real_src: Original C source code string.
+        :param const_pool: Constant pool dictionary.
+        :return: Final label string or None.
+    """
     annotated_body = None
     if real_src:
         annotated_body = annotate_real_c_body_with_placeholders(real_src, const_pool)
         annotated_body = strip_c_comments(annotated_body)
-
-    #sig_hint = build_signature_hint_from_lookup(func_name, dwarf_lookup)
 
     if annotated_body:
         body = annotated_body.strip()
@@ -444,8 +430,5 @@ def finalize_label_for_training(func_name, real_src, const_pool, dwarf_lookup):
             return body
 
         return None
-
-    # if sig_hint:
-    #     return sig_hint.strip()
 
     return None

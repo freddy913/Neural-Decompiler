@@ -61,7 +61,10 @@ class MockFunction:
 
 def compute_context_budget(target_token_count):
     """
-    Nonlinear context budget based on decompilation and RAG literature. (!!8K Encoder)
+    Computes nonlinear context budget based on target function size.
+    Args:
+        :param target_token_count: Token count of the target function.
+        :return: Context budget as integer.
     """
     if target_token_count <= 128:
         return 1000
@@ -76,18 +79,12 @@ def compute_context_budget(target_token_count):
     else:
         return 6500
 
-# TODO: not used?
-def get_token_length_of_entry(entry, tokenizer):
-    if "token_count" in entry and entry["token_count"] is not None:
-        return entry["token_count"]
-    # fallback: use raw tokenizer length of assembly
-    asm = entry.get("assembly", "")
-    return len(tokenizer(asm, truncation=False)["input_ids"])
-
 def _binary_slug_from_path(binary_path: str) -> str:
     """
-    Create a slug from the last two path components of the binary path.
-    Falls back to the last component and finally to 'sample' if unavailable.
+    Creates a slug identifier from the last two path components of binary.
+    Args:
+        :param binary_path: Absolute or relative path to binary file.
+        :return: Slug string for identification.
     """
     normalized = os.path.normpath(binary_path or "")
     parts = [part for part in normalized.split(os.sep) if part]
@@ -104,11 +101,13 @@ def _binary_slug_from_path(binary_path: str) -> str:
     return last_component or "sample"
 
 def _ensure_pair_jsonl_path(binary_path: str, function_name: str) -> str:
-    """Resolve and cache the JSONL path for the current binary/function."""
-    # global PAIR_JSONL_PATH
-    # if PAIR_JSONL_PATH:
-    #     return PAIR_JSONL_PATH
-
+    """
+    Resolves and constructs the JSONL output path for binary-function pair.
+    Args:
+        :param binary_path: Path to the binary file.
+        :param function_name: Name of the target function.
+        :return: Absolute path to JSONL file as string.
+    """
     slug = _binary_slug_from_path(binary_path)
     function_slug = function_name or "target"
     random_suffix = random.randint(0, 999)
@@ -122,8 +121,12 @@ def write_debug_artifacts(
     header_block
 ):
     """
-    Writes debug files to disk so humans can inspect the context selection.
-    Does NOT affect the actual model input anymore.
+    Writes debug files for human inspection of context selection.
+    Args:
+        :param target_func_data: Dictionary containing target function data.
+        :param context_funcs: List of selected context functions.
+        :param header_block: Header string with includes.
+        :return: None.
     """
     context_funcs = context_funcs or []
     target_name = target_func_data.get('name') 
@@ -205,6 +208,11 @@ def _compact_label(label):
     return _one_line(body)
 
 def init_pair_files():
+    """
+    Initializes pair output files by creating directories and clearing old files.
+    Args:
+        :return: None.
+    """
     os.makedirs(INPUT_DIR, exist_ok=True)
     for p in (FUNCTION_TXT_PATH, ASSEMBLY_TXT_PATH):
         try: os.unlink(p)
@@ -214,15 +222,29 @@ def init_pair_files():
     PAIR_JSONL_PATH = None
 
 def _append_pair_jsonl(asm_payload: str, lbl_payload: str, jsonl_path: str):
-    """Append the provided pair as a JSONL entry."""
+    """
+    Appends an assembly-label pair to JSONL file.
+    Args:
+        :param asm_payload: Assembly input string.
+        :param lbl_payload: Label C code string.
+        :param jsonl_path: Path to JSONL output file.
+        :return: None.
+    """
     payload = {"input": asm_payload, "output": lbl_payload}
-    #jsonl_path = _ensure_pair_jsonl_path()
     os.makedirs(os.path.dirname(jsonl_path), exist_ok=True)
     with open(jsonl_path, "a", encoding="utf-8") as pf:
         json.dump(payload, pf)
         pf.write("\n")
 
 def append_pair(model_input, label_c_code, jsonl_path=None):
+    """
+    Appends assembly-label pair to output files with validation.
+    Args:
+        :param model_input: Normalized assembly input string.
+        :param label_c_code: C code label string.
+        :param jsonl_path: Optional path to JSONL file.
+        :return: True if pair was written, False otherwise as boolean.
+    """
     asm  = _one_line(model_input)
     lbl_full = (label_c_code or "").strip()
     lbl_preview = _compact_label(label_c_code)
@@ -252,9 +274,12 @@ def append_pair(model_input, label_c_code, jsonl_path=None):
 
 def _generate_input_from_binary(binary_path, function_name, UseContext="true"):
     """
-    This function is the deterministic core of the pipeline.
-    It takes a binary path and function name and ALWAYS produces the same input string.
-    No 'mode', no label lookup.
+    Generates deterministic model input from binary and function name.
+    Args:
+        :param binary_path: Absolute path to binary file.
+        :param function_name: Name of target function.
+        :param UseContext: String "true" or "false" to include context functions.
+        :return: Formatted model input string or None.
     """
     
     project, cfg = load_project(binary_path)
@@ -297,7 +322,7 @@ def _generate_input_from_binary(binary_path, function_name, UseContext="true"):
         context_funcs = apply_heuristic(
             target_func_data, candidate_data, context_budget,
             cfg.functions.callgraph, all_functions_map, target_func.addr,
-            project, mode="test", assembly_only=True
+            project
         ) or []
 
     callers_asm = []
@@ -337,7 +362,15 @@ def _generate_input_from_binary(binary_path, function_name, UseContext="true"):
 
 def build_sample(binary_path: str, function_name: str, mode="train", UseContext="true", source_hint=None, dwarf_lookup=None):
     """
-    Wrapper around the core function that handles mode (train/test).
+    Builds a complete sample with input and optional label for training or testing.
+    Args:
+        :param binary_path: Absolute path to binary file.
+        :param function_name: Name of target function.
+        :param mode: String "train" or "test" mode.
+        :param UseContext: String "true" or "false" for context inclusion.
+        :param source_hint: Optional path hint to source file.
+        :param dwarf_lookup: Optional DWARF lookup dictionary.
+        :return: Sample dictionary or None.
     """
 
     if mode == "train":
@@ -380,7 +413,7 @@ def build_sample(binary_path: str, function_name: str, mode="train", UseContext=
 
     if mode == "train":
         formatted_output = finalize_label_for_training(
-            function_name, check_src, const_pool_target, dwarf_ref
+            check_src, const_pool_target
         )
         
         if not formatted_output:
@@ -401,6 +434,12 @@ def build_sample(binary_path: str, function_name: str, mode="train", UseContext=
 #     PAIR_JSONL_PATH = None
 
 def _iter_compiled_binaries(compiled_root):
+    """
+    Iterates over compiled binaries in repository structure.
+    Args:
+        :param compiled_root: Root directory of compiled binaries.
+        :return: Generator yielding (repo_name, binary_path) tuples.
+    """
     if not os.path.isdir(compiled_root):
         print(f"[WARN] Compiled directory '{compiled_root}' does not exist.")
         return
@@ -417,6 +456,11 @@ def _iter_compiled_binaries(compiled_root):
             break
 
 def main():
+    """
+    Main entry point for AsmToInput pipeline with argument parsing.
+    Args:
+        :return: None.
+    """
     parser = argparse.ArgumentParser(description="Run decompiler pipeline")
     parser.add_argument(
         "--mode",

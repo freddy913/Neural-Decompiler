@@ -43,6 +43,12 @@ _SIMPLE_FUNC_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(", re.MULTILINE)
 TASK_TIMEOUT_SECONDS = 60
 
 def _extract_function_names(text: str):
+    """
+    Extracts function names from C source text using regex.
+    Args:
+        :param text: C source code text.
+        :return: List of unique function names.
+    """
     names = []
     for m in _SIMPLE_FUNC_RE.finditer(text):
         name = m.group(1)
@@ -53,7 +59,12 @@ def _extract_function_names(text: str):
 
 
 def _as_relative(path: str) -> str:
-    """Return a ./-prefixed, POSIX-style relative path for consistent downstream use."""
+    """
+    Converts path to relative POSIX-style with ./ prefix.
+    Args:
+        :param path: Input file path.
+        :return: Relative path string with ./ prefix.
+    """
     try:
         rel_path = os.path.relpath(path, start=os.getcwd())
     except ValueError:
@@ -63,7 +74,12 @@ def _as_relative(path: str) -> str:
     return rel_path.replace("\\", "/")
 
 def _to_compiled_binary_path(executable_candidate: str) -> str:
-    """Translate a discovered C_COMPILE executable path into the COMPILED tree."""
+    """
+    Translates C_COMPILE path to corresponding COMPILED tree path.
+    Args:
+        :param executable_candidate: Path in C_COMPILE directory.
+        :return: Translated path in COMPILED directory.
+    """
     abs_path = os.path.abspath(executable_candidate)
     parts = abs_path.split(os.sep)
     try:
@@ -76,9 +92,10 @@ def _to_compiled_binary_path(executable_candidate: str) -> str:
 
 def _resolve_binary_path(executable_candidate: str) -> Tuple[str, bool]:
     """
-    Return (path, exists) for the compiled binary corresponding to executable_candidate.
-
-    Falls back to higher-level directories if the compiled tree does not mirror the source tree.
+    Resolves compiled binary path with fallback to parent directories.
+    Args:
+        :param executable_candidate: Path to executable in C_COMPILE tree.
+        :return: Tuple of (resolved_path, exists_flag).
     """
     primary = _to_compiled_binary_path(executable_candidate)
     primary_path = Path(primary)
@@ -102,6 +119,12 @@ def _resolve_binary_path(executable_candidate: str) -> Tuple[str, bool]:
     return str(primary_path), False
 
 def _fast_process_file(path: str):
+    """
+    Rapidly processes single C file to extract function metadata.
+    Args:
+        :param path: Absolute path to C source file.
+        :return: List of (source_path, executable_path, functions) tuples.
+    """
     try:
         size = os.path.getsize(path)
         if MAX_FILE_BYTES and size > MAX_FILE_BYTES:
@@ -155,6 +178,12 @@ def _fast_process_file(path: str):
     return results_local
 
 def _iter_source_files(base_dir: str):
+    """
+    Iterates over all .c and .h files in directory tree.
+    Args:
+        :param base_dir: Base directory to scan.
+        :return: Generator yielding file paths.
+    """
     base_dir = os.path.normpath(base_dir)
     for root, _, files in os.walk(base_dir):
         for name in files:
@@ -162,6 +191,13 @@ def _iter_source_files(base_dir: str):
                 yield os.path.join(root, name)
 
 def collect_executable_function_metadata(base_dir: str = "./C_COMPILE", workers=None):
+    """
+    Collects metadata for all executables and their functions in parallel.
+    Args:
+        :param base_dir: Base directory to scan.
+        :param workers: Number of parallel workers or None for auto-detect.
+        :return: List of (source_path, exec_path, functions) tuples.
+    """
     if not os.path.isdir(base_dir):
         raise FileNotFoundError(base_dir)
 
@@ -187,11 +223,10 @@ def collect_executable_function_metadata(base_dir: str = "./C_COMPILE", workers=
 
 def _run_single_task(task):
     """
-    task: (script_path, binary_path, source_path, func_name)
-
-    Führt:
-      python3 AsmToInput.py --mode test --binary-path ... --function-name ... --source-path ... --UseContext true
-    aus und gibt (func_name, binary_path, success_bool) zurück.
+    Executes single AsmToInput task for one function.
+    Args:
+        :param task: Tuple of (script_path, binary_path, source_path, function_name).
+        :return: Tuple of (function_name, binary_path, success_flag).
     """
     script_path, binary_path, source_path, func = task
 
@@ -236,11 +271,10 @@ def _run_single_task(task):
     
 def _run_binary_task(task):
     """
-    task: (script_path, worklist_path, source_path)
-
-    Ruft:
-      python3 AsmToInput.py --mode train --batch --worklist ... --source-path ... --UseContext true
-    auf und lässt AsmToInput alle Funktionen aus der Worklist abarbeiten.
+    Executes batch processing for all functions in one binary using worklist.
+    Args:
+        :param task: Tuple of (script_path, worklist_path, source_path).
+        :return: Tuple of (worklist_path, success_flag).
     """
     script_path, worklist_path, source_path = task
 
@@ -285,6 +319,13 @@ def _run_binary_task(task):
 
 
 def _make_worklist_for_binary(binary_path, functions):
+    """
+    Creates temporary worklist file mapping binary to its functions.
+    Args:
+        :param binary_path: Path to compiled binary.
+        :param functions: List of function names.
+        :return: Path to temporary worklist file.
+    """
     f = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False)
     for func in functions:
         f.write(f"{binary_path}\t{func}\n")
@@ -292,6 +333,11 @@ def _make_worklist_for_binary(binary_path, functions):
     return f.name
 
 def main():
+    """
+    Main entry point for parallel training data generation.
+    Args:
+        :return: None.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--workers", type=int, default=0,
                         help="Number of parallel workers (default: env CREATE_TRAIN_WORKERS or all cores)")
