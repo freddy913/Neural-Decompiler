@@ -1,4 +1,10 @@
+"""
+Generates training data from compiled binaries using parallel processing.
+"""
+import sys
 import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+
 import re
 import shlex
 import subprocess
@@ -42,13 +48,14 @@ _SIMPLE_FUNC_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(", re.MULTILINE)
 
 TASK_TIMEOUT_SECONDS = 60
 
-def _extract_function_names(text: str):
+def _extract_function_names(text):
     """
     Extracts function names from C source text using regex.
     Args:
         :param text: C source code text.
         :return: List of unique function names.
     """
+
     names = []
     for m in _SIMPLE_FUNC_RE.finditer(text):
         name = m.group(1)
@@ -58,13 +65,14 @@ def _extract_function_names(text: str):
     return list(dict.fromkeys(names))
 
 
-def _as_relative(path: str) -> str:
+def _as_relative(path):
     """
     Converts path to relative POSIX-style with ./ prefix.
     Args:
         :param path: Input file path.
         :return: Relative path string with ./ prefix.
     """
+
     try:
         rel_path = os.path.relpath(path, start=os.getcwd())
     except ValueError:
@@ -73,13 +81,14 @@ def _as_relative(path: str) -> str:
         rel_path = f"./{rel_path}"
     return rel_path.replace("\\", "/")
 
-def _to_compiled_binary_path(executable_candidate: str) -> str:
+def _to_compiled_binary_path(executable_candidate):
     """
     Translates C_COMPILE path to corresponding COMPILED tree path.
     Args:
         :param executable_candidate: Path in C_COMPILE directory.
         :return: Translated path in COMPILED directory.
     """
+
     abs_path = os.path.abspath(executable_candidate)
     parts = abs_path.split(os.sep)
     try:
@@ -90,13 +99,14 @@ def _to_compiled_binary_path(executable_candidate: str) -> str:
     return os.sep.join(parts)
 
 
-def _resolve_binary_path(executable_candidate: str) -> Tuple[str, bool]:
+def _resolve_binary_path(executable_candidate):
     """
     Resolves compiled binary path with fallback to parent directories.
     Args:
         :param executable_candidate: Path to executable in C_COMPILE tree.
         :return: Tuple of (resolved_path, exists_flag).
     """
+
     primary = _to_compiled_binary_path(executable_candidate)
     primary_path = Path(primary)
     if primary_path.exists():
@@ -118,13 +128,14 @@ def _resolve_binary_path(executable_candidate: str) -> Tuple[str, bool]:
 
     return str(primary_path), False
 
-def _fast_process_file(path: str):
+def _fast_process_file(path):
     """
     Rapidly processes single C file to extract function metadata.
     Args:
         :param path: Absolute path to C source file.
         :return: List of (source_path, executable_path, functions) tuples.
     """
+
     try:
         size = os.path.getsize(path)
         if MAX_FILE_BYTES and size > MAX_FILE_BYTES:
@@ -177,20 +188,21 @@ def _fast_process_file(path: str):
 
     return results_local
 
-def _iter_source_files(base_dir: str):
+def _iter_source_files(base_dir):
     """
     Iterates over all .c and .h files in directory tree.
     Args:
         :param base_dir: Base directory to scan.
         :return: Generator yielding file paths.
     """
+
     base_dir = os.path.normpath(base_dir)
     for root, _, files in os.walk(base_dir):
         for name in files:
             if name.endswith((".c", ".h")):
                 yield os.path.join(root, name)
 
-def collect_executable_function_metadata(base_dir: str = "./C_COMPILE", workers=None):
+def collect_executable_function_metadata(base_dir="./C_COMPILE", workers=None):
     """
     Collects metadata for all executables and their functions in parallel.
     Args:
@@ -198,6 +210,7 @@ def collect_executable_function_metadata(base_dir: str = "./C_COMPILE", workers=
         :param workers: Number of parallel workers or None for auto-detect.
         :return: List of (source_path, exec_path, functions) tuples.
     """
+
     if not os.path.isdir(base_dir):
         raise FileNotFoundError(base_dir)
 
@@ -228,6 +241,7 @@ def _run_single_task(task):
         :param task: Tuple of (script_path, binary_path, source_path, function_name).
         :return: Tuple of (function_name, binary_path, success_flag).
     """
+
     script_path, binary_path, source_path, func = task
 
     cmd = [
@@ -276,6 +290,7 @@ def _run_binary_task(task):
         :param task: Tuple of (script_path, worklist_path, source_path).
         :return: Tuple of (worklist_path, success_flag).
     """
+
     script_path, worklist_path, source_path = task
 
     cmd = [
