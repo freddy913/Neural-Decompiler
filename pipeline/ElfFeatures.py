@@ -93,7 +93,7 @@ def load_project(binary_path):
         cfg = project.analyses.CFGFast(
             normalize=True,
             resolve_indirect_jumps=True,
-            data_references=True  # Wichtig für Konstanten!
+            data_references=True 
         )
     except Exception as e:
         print(f"Failed to generate CFG: {e}")
