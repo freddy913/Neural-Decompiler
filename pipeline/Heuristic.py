@@ -1,3 +1,17 @@
+"""
+Decides which neighbouring functions gets attached to the model's input as context.
+
+We walk the call graph outward from the target function up to DEGREE
+hops, collecting callers and callees. Then score every candidate on multiple
+signals: struct-pointer fingerprint overlap, basic-block-count similarity,
+semantic name matching (e.g. "init_server" vs "start_server"), shared API calls,
+and raw callgraph distance. The scores are summed and candidates are greedily
+picked in descending order until the remaining token budget is exhausted.
+
+Also contains build_header_block_from_binary() which inspects the binary's
+imported symbols and guesses the likely #include directives (stdio.h, stdlib.h,
+string.h, etc.) to prepend as a header hint.
+"""
 import os
 import re
 import shutil

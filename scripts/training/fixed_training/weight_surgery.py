@@ -1,6 +1,9 @@
 """
-Performs weight surgery on checkpoint to fix tokenizer and embedding issues.
-Rebuilds model from base with corrected token embeddings and weight tying.
+One-time repair script for checkpoint epoch 27 which was trained with the
+broken tokenizer. Loads the base google/long-t5-tglobal-base model, rebuilds
+the tokenizer with our special C tokens, resizes the embedding matrix to match,
+copies over the trained weights that still have the right shape, and re-ties
+encoder/decoder/lm_head embeddings. Output goes to LongT5_Clean_Start/.
 """
 import sys
 import os

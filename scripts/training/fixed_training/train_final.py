@@ -1,6 +1,11 @@
 """
-Final fixed training script with tokenizer and weight-tying corrections.
-This is the production-ready version after resolving embedding issues.
+Production training script — the one that actually produces working checkpoints.
+Fixes over the legacy version:
+  - Tokenizer is rebuilt with all special C tokens before training starts.
+  - Embedding matrix is resized and properly weight-tied (encoder ↔ decoder ↔ lm_head).
+  - bf16 mixed precision via Accelerate + DeepSpeed ZeRO-3.
+  - Streams training data from JSONL so we don't OOM on large datasets.
+  - Writes loss_data.txt each epoch for plot_training_loss.py.
 """
 import sys
 import os

@@ -1,5 +1,8 @@
 """
-Creates scatter plot comparing function complexity with decompilation success rate.
+Joins function_complexity.csv with pass_fail_results.csv and produces
+a scatter plot showing whether more complex functions (higher basic block /
+branch count) are harder for the model to decompile correctly.
+Colour-codes pass vs. fail and adds a trend line.
 """
 import sys
 import os

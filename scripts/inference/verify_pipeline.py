@@ -1,5 +1,7 @@
 """
-Verifies pipeline output against objdump ground truth for single binary/function.
+Single-shot pipeline verification. Give it a binary path and a function name,
+and it will run the pipeline and objdump in parallel, then print both outputs
+side by side so you can visually confirm they agree.
 """
 import sys
 import os

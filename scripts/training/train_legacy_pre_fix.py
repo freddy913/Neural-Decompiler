@@ -1,7 +1,9 @@
 """
-Legacy training script (pre-tokenizer fix). 
-This version was used before the tokenizer and weight-tying issues were resolved.
-For the fixed version, use scripts/training/fixed_training/train_final.py
+DEPRECATED: this is the original training script from before we discovered
+that the tokenizer's added special tokens weren't properly wired into the
+embedding matrix, and that weight tying between encoder/decoder embeddings
+was broken. Models trained with this version plateau early.
+Kept for reference; use scripts/training/fixed_training/train_final.py instead.
 """
 import sys
 import os

@@ -1,5 +1,8 @@
 """
-Verifies pipeline output against objdump for random batch of test samples.
+Quick sanity check: picks N random JSONL samples from the training set,
+runs them back through the pipeline, and diffs the normalized assembly
+against objdump output side-by-side. Useful for catching normalizer
+regressions without running the full evaluation suite.
 """
 import sys
 import os

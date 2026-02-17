@@ -1,5 +1,11 @@
 """
-Scrapes C source files from GitHub repository and validates compilability.
+Small helper script that pulls individual .c files from a single GitHub repo
+via the REST API, writes them to C_COMPILE/, and test-compiles each with gcc.
+Files that don't compile cleanly are discarded.
+
+This is an alternative to the BigQuery+GithubJSON2FILE route: useful when
+you just want to grab one specific project instead of bulk-downloading.
+Set GITHUB_TOKEN, TARGET_OWNER, and TARGET_REPO before running.
 """
 import sys
 import os

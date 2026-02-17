@@ -1,5 +1,7 @@
 """
-Decompiles functions from binaries using single model from Hugging Face.
+Bulk inference script. Loads one LongT5 checkpoint, iterates over all
+functions in the test binaries, runs build_sample() + model.generate()
+for each, and saves the predicted C code to individual .c files.
 """
 import sys
 import os

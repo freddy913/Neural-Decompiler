@@ -1,3 +1,17 @@
+"""
+This module is only relevant during training: at inference time we never have
+source code or DWARF info, so none of this runs.
+
+What it does:
+  1. build_dwarf_lookup_for_repo() scans all .o files in a repo directory,
+     parses their DWARF debug info (DW_TAG_subprogram entries), and builds
+     a lookup: function_name -> {signature, source_file, line_range}.
+  2. Given a function name, we locate the original C source, extract the
+     function body, strip comments, and replace string literals that appear
+     in the constant pool with the matching placeholder tokens (STRx..., etc.).
+  3. finalize_label_for_training() does a final sanity check (balanced braces,
+     non-empty body, no leftover debug artefacts) before the label is accepted.
+"""
 from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_REG_RIP
 from elftools.elf.elffile import ELFFile
 from elftools.dwarf.descriptions import describe_form_class

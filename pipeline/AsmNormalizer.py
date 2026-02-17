@@ -1,3 +1,19 @@
+"""
+Takes the raw Capstone disassembly produced by ElfFeatures and turns it into
+the deterministic, token-efficient format that the LongT5 model actually sees.
+
+What happens during normalization:
+  1. RIP-relative memory operands like [rip+0x2a3f] are replaced with constant
+     pool placeholders (STRx..., FMTx..., etc.) looked up from the pool dict.
+  2. call instructions pointing at hex addresses are resolved to symbolic names
+     (e.g. call printf@plt) using a cached PLT/GOT symbol map.
+  3. Absolute jump targets become sequential labels (@jmp0, @jmp1, ...).
+  4. Trailing padding after ret (nop / int3 / next prologue) is stripped.
+  5. ptr-size qualifiers (qword ptr, dword ptr ...) are removed.
+
+The final output is a single flat string:
+  HEADER:<includes> TARGET:func;<asm> CALLERS:FN{<asm>} CALLEES:FN{<asm>}
+"""
 import os
 import re
 import weakref

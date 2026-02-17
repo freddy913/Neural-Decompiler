@@ -1,5 +1,8 @@
 """
-Measures and exports cyclomatic complexity metrics for compiled binary functions.
+Loads each test binary with angr, iterates over all user-like functions,
+counts the number of basic blocks and conditional branches (as a proxy
+for cyclomatic complexity), and writes everything to function_complexity.csv.
+The CSV is later consumed by plot_complexity_vs_success.py.
 """
 import sys
 import os

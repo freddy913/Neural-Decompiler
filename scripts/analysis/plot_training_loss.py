@@ -1,5 +1,7 @@
 """
-Visualizes training and validation loss curves from model training logs.
+Reads loss_data.txt (written by train_final.py each epoch) and plots
+training loss + validation loss on a single chart. Marks the epoch
+where the tokenizer fix was applied so we can see the jump.
 """
 import sys
 import os

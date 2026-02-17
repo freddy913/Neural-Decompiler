@@ -1,3 +1,12 @@
+"""
+Basic sanity tests for the pipeline.
+Checks that the normalizer doesn't break on edge cases like
+empty input, special hex casing, or operands with extra whitespace.
+Also verifies that the context budget curve in AsmToInput behaves
+as expected (small functions get ~1000 tokens, large ones up to 6500).
+
+Run with: python -m pytest tests/
+"""
 import unittest
 import sys
 import os

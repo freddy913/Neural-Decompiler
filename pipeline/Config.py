@@ -1,3 +1,13 @@
+"""
+This file holds all the knobs and constants that the rest of the pipeline reads.
+The most important one is CONTEXT_THRESHOLD_TOKENS = 8192, which caps how many
+tokens a single model input may contain (target + context + header combined).
+We load the LongT5 tokenizer here once so every other module can just import it
+instead of re-instantiating. JUNK_FUNCTIONS and RUNTIME_ENTRY_FUNCTIONS list
+libc / CRT symbols that should never be treated as user-written code.
+DEGREE controls how many hops in the call graph we consider for context.
+Set WRITE_DEBUG_FILES = True to dump human-readable artifacts into DEBUG/.
+"""
 import logging
 from transformers import AutoTokenizer
 

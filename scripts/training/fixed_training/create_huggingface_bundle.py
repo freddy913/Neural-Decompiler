@@ -1,6 +1,10 @@
 """
-Packages trained model checkpoint for Hugging Face Hub upload.
-Converts DeepSpeed checkpoint to standard format with proper metadata.
+After training finishes we have a DeepSpeed ZeRO-3 checkpoint which consists of
+sharded optimizer states and model partitions — not something you can upload
+to the HuggingFace Hub directly. This script consolidates the shards into
+a single pytorch_model.bin, copies the tokenizer config from the clean start
+directory, and writes the model card so the result is a standard HF repo
+that can be loaded with AutoModelForSeq2SeqLM.from_pretrained().
 """
 import sys
 import os

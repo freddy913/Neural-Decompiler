@@ -1,3 +1,15 @@
+"""
+Everything that touches the actual ELF binary lives here:
+load_project() opens a binary with angr, builds a CFGFast, and caches both
+so repeated calls for the same file are instant. get_function_assembly()
+walks the basic blocks through Capstone and returns raw disassembly lines.
+The second half of the file deals with the constant pool: we scan every
+instruction for RIP-relative and immediate operands that point into .rodata,
+read the zero-terminated bytes at that address, and classify them as
+STR (plain string), FMT (printf-style format), CMD (shell command), or DAT
+(non-printable blob). Each entry gets a placeholder like STRx4019e7 that
+the normalizer and label generator will substitute into the model input.
+"""
 import os
 import re
 import string

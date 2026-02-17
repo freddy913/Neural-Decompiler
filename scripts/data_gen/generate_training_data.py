@@ -1,5 +1,12 @@
 """
-Generates training data from compiled binaries using parallel processing.
+This script is meant to be run after ObjectToBinary.py has produced linked executables.
+It walks the COMPILED/ directory tree, finds every executableN file, extracts the
+function names from the corresponding .c source, and creates a TSV worklist of
+(binary_path, function_name) pairs. It then spawns --workers parallel processes,
+each calling AsmToInput.build_sample() in train mode, writing JSONL pairs into INPUT/.
+
+Usage:
+    python generate_training_data.py --compiled-root ./COMPILED --workers 8
 """
 import sys
 import os

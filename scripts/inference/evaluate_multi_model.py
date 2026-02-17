@@ -1,5 +1,8 @@
 """
-Evaluates multiple model checkpoints on test binaries for epoch comparison.
+Loads a list of HuggingFace checkpoint directories (one per epoch),
+runs each through every function in the test binaries, and appends
+the predictions to a results file so we can compare epoch-by-epoch
+which checkpoint produces the best decompilations.
 """
 import sys
 import os

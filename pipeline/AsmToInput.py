@@ -1,3 +1,16 @@
+"""
+This is the main entry point of the whole pipeline.
+build_sample(binary_path, function_name) is the function that every other
+script calls — it loads the binary via angr, extracts the target function's
+assembly, picks context functions with the heuristic, normalises everything
+through AsmNormalizer, and returns a ready-to-use dict with 'model_input'
+(and optionally 'label_c_code' when running in train mode).
+
+_generate_input_from_binary() handles the token budget arithmetic:
+we subtract target + header tokens from the 8192 cap, and pass the rest
+as the context budget to the heuristic scorer.
+
+"""
 import argparse
 import json
 import os, re, sys, time
