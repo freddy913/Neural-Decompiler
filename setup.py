@@ -19,8 +19,10 @@ setup(
         "unicorn",
         "tqdm",
         "matplotlib",
+        "numpy",
         "pandas",
-        "seaborn"
+        "seaborn",
+        "requests"
     ],
     python_requires=">=3.10",
 )

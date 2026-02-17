@@ -6,8 +6,6 @@ sentencepiece
 
 # PyTorch 
 torch
-torchvision
-torchaudio
 
 # DeepSpeed for ZeRO-3
 deepspeed
@@ -21,3 +19,7 @@ unicorn
 # Utilities
 tqdm
 matplotlib
+numpy
+pandas
+seaborn
+requests
