@@ -22,7 +22,8 @@ setup(
         "numpy",
         "pandas",
         "seaborn",
-        "requests"
+        "requests",
+        "streamlit"
     ],
     python_requires=">=3.10",
 )

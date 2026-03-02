@@ -20,7 +20,7 @@ import weakref
 from bisect import bisect_left
 import re as _re_end
 
-from ElfFeatures import _function_symbol_addrs
+from .ElfFeatures import _function_symbol_addrs
 
 _LABEL_DEBUG = os.environ.get("LABEL_DEBUG") == "1"
 _PLT_SUFFIX_RE = re.compile(r'@plt$', re.IGNORECASE)
@@ -369,7 +369,9 @@ def normalize_model_input_with_context_groups(
     header: str,
     project,
     target_func_obj,
-    const_pool_for_target: dict
+    const_pool_for_target: dict,
+    strip_operand_sizes: bool = True,
+    abstract_strings: bool = True,
 ) -> str:
     """
     Normalizes and formats assembly with context into structured model input.
@@ -381,6 +383,8 @@ def normalize_model_input_with_context_groups(
         :param project: Angr project object.
         :param target_func_obj: Target function object.
         :param const_pool_for_target: Constant pool for the target function.
+        :param strip_operand_sizes: Whether to strip ptr qualifiers (dword ptr etc.).
+        :param abstract_strings: Whether to replace RIP-relative strings with placeholders.
         :return: Formatted model input string.
     """
     
@@ -424,7 +428,7 @@ def normalize_model_input_with_context_groups(
                 label = addr_to_label[addr]
                 pass 
 
-            s = _replace_rip_rel_with_pool(line, const_pool_for_target)
+            s = _replace_rip_rel_with_pool(line, const_pool_for_target) if abstract_strings else line
             s = _rewrite_calls(s, project)
 
             def _repl_jmp(m):
@@ -443,7 +447,8 @@ def normalize_model_input_with_context_groups(
 
         seq = _ensure_prologue_first(final_lines)
         seq = _cut_after_function_end(seq)
-        seq = [_normalize_operands(x) for x in seq]
+        if strip_operand_sizes:
+            seq = [_normalize_operands(x) for x in seq]
         return _tighten_commas_semicolons(join_semicolon(seq))
 
     target_str = _process_one_asm_block(target_asm)

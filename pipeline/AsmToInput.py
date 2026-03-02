@@ -16,9 +16,9 @@ import json
 import os, re, sys, time
 import random
 
-import Config
+from . import Config
 
-from Config import (
+from .Config import (
     TARGET_BINARY_PATH,
     TARGET_FUNCTION_NAME,
     CONTEXT_THRESHOLD_TOKENS,
@@ -30,7 +30,7 @@ from Config import (
     VERBOSE,
 )
 
-from Heuristic import (
+from .Heuristic import (
     get_real_c_code,
     apply_heuristic,
     get_context_candidates_with_degrees,
@@ -40,18 +40,18 @@ from Heuristic import (
     is_relevant_user_like_function,
 )
 
-from HintsAndLabels import (
+from .HintsAndLabels import (
     build_dwarf_lookup_for_repo, 
     finalize_label_for_training, 
 )
 
-from ElfFeatures import (
+from .ElfFeatures import (
     load_project,
     get_function_data,
     collect_constant_pool_for_function,
 )
 
-from AsmNormalizer import join_semicolon, normalize_model_input_with_context_groups
+from .AsmNormalizer import join_semicolon, normalize_model_input_with_context_groups
 
 
 INPUT_DIR = os.path.join(".", "INPUT")
@@ -284,13 +284,15 @@ def append_pair(model_input, label_c_code, jsonl_path=None):
     sys.stdout.flush()
     return True
 
-def _generate_input_from_binary(binary_path, function_name, UseContext="true"):
+def _generate_input_from_binary(binary_path, function_name, UseContext="true", strip_operand_sizes=True, abstract_strings=True):
     """
     Generates deterministic model input from binary and function name.
     Args:
         :param binary_path: Absolute path to binary file.
         :param function_name: Name of target function.
         :param UseContext: String "true" or "false" to include context functions.
+        :param strip_operand_sizes: Whether to strip ptr qualifiers from assembly.
+        :param abstract_strings: Whether to replace strings with constant pool placeholders.
         :return: Formatted model input string or None.
     """
     
@@ -366,13 +368,15 @@ def _generate_input_from_binary(binary_path, function_name, UseContext="true"):
         header=header_block,
         project=project,
         target_func_obj=target_func,
-        const_pool_for_target=const_pool_target
+        const_pool_for_target=const_pool_target,
+        strip_operand_sizes=strip_operand_sizes,
+        abstract_strings=abstract_strings,
     )
     
     return formatted_input
 
 
-def build_sample(binary_path: str, function_name: str, mode="train", UseContext="true", source_hint=None, dwarf_lookup=None):
+def build_sample(binary_path: str, function_name: str, mode="train", UseContext="true", source_hint=None, dwarf_lookup=None, strip_operand_sizes=True, abstract_strings=True):
     """
     Builds a complete sample with input and optional label for training or testing.
     Args:
@@ -382,6 +386,8 @@ def build_sample(binary_path: str, function_name: str, mode="train", UseContext=
         :param UseContext: String "true" or "false" for context inclusion.
         :param source_hint: Optional path hint to source file.
         :param dwarf_lookup: Optional DWARF lookup dictionary.
+        :param strip_operand_sizes: Whether to strip ptr qualifiers from assembly.
+        :param abstract_strings: Whether to replace strings with constant pool placeholders.
         :return: Sample dictionary or None.
     """
 
@@ -410,7 +416,9 @@ def build_sample(binary_path: str, function_name: str, mode="train", UseContext=
 
     const_pool_target = collect_constant_pool_for_function(target_func, project)
 
-    model_input = _generate_input_from_binary(binary_path, function_name, UseContext)
+    model_input = _generate_input_from_binary(binary_path, function_name, UseContext,
+                                               strip_operand_sizes=strip_operand_sizes,
+                                               abstract_strings=abstract_strings)
     
     if not model_input:
         return None 

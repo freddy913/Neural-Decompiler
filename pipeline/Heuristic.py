@@ -18,9 +18,9 @@ import shutil
 import subprocess
 import random
 
-from ElfFeatures import get_function_data, get_token_count
-from Config import BASIC_SCORE, DEGREE, JUNK_FUNCTIONS, MYTOKENIZER, RUNTIME_ENTRY_FUNCTIONS
-from HintsAndLabels import pick_best_match
+from .ElfFeatures import get_function_data, get_token_count
+from .Config import BASIC_SCORE, DEGREE, JUNK_FUNCTIONS, MYTOKENIZER, RUNTIME_ENTRY_FUNCTIONS
+from .HintsAndLabels import pick_best_match
 
 
 def get_context_candidates(target_func, cfg):

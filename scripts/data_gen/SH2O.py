@@ -438,7 +438,7 @@ if __name__ == '__main__':
     compilePath = "C_COMPILE" # Where our repositories with source and header files are
     destinationPath = "COMPILED" # Default destination where to store object files
     default_compiler = 'gcc'  # Default compiler
-    default_optimization = '1' # -O0
+    default_optimization = '0' # -O0
     default_timeout = 60 # 60 standard
     default_max_file_size = 5242880 # 104857600 # 5242880 # 5 MB! Unit is in 512-byte blocks. ulimit -f 1 equals to max file size of 512 bytes. 1MB is 2^20 bytes, 10MB is 10*2^20 = 10485760 and divided by 512 byte blocks is 20480 blocks. https://www.ibm.com/docs/en/zos/2.4.0?topic=descriptions-ulimit-set-process-limits
     number_of_processes = 4

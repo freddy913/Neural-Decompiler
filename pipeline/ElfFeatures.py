@@ -17,7 +17,7 @@ import string
 import angr
 from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_REG_RIP
 from typing import Optional, Tuple, Dict
-from Config import MYTOKENIZER
+from .Config import MYTOKENIZER
 
 STREAM_STDERR = "STREAM_STDERR"
 STREAM_STDOUT = "STREAM_STDOUT"
