@@ -1,26 +1,26 @@
 # Hugging Face ecosystem
-transformers
-accelerate
-datasets
-sentencepiece
+transformers==4.57.6
+accelerate==1.14.0
+datasets==5.0.1
+sentencepiece==0.2.2
 
-# PyTorch 
-torch
+# PyTorch
+torch==2.14.0
 
 # DeepSpeed for ZeRO-3
-deepspeed
+deepspeed==0.19.6
 
 # Binary Analysis
-angr
-pyelftools
-capstone
-unicorn
+angr==9.2.213
+pyelftools==0.33
+capstone==5.0.6
+unicorn==2.1.4
 
 # Utilities
-tqdm
-matplotlib
-numpy
-pandas
-seaborn
-requests
-streamlit
+tqdm==4.70.0
+matplotlib==3.11.1
+numpy==2.4.6
+pandas==3.0.5
+seaborn==0.13.2
+requests==2.34.2
+streamlit==1.63.0
